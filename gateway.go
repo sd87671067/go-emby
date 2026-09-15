@@ -32,6 +32,9 @@ func (a *App) gatewayFor(targetURL string) http.Handler {
 		fail(w, 502, "直链解析失败；已禁止服务器中转视频，请检查 NanShare 与视频源")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if done := a.beginProxyDebug(&w, r); done != nil {
+			defer done()
+		}
 		if isVideoRequest(r.URL.Path) {
 			u, e := a.auth(r)
 			if e != nil {

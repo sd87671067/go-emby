@@ -228,8 +228,10 @@ func (a *App) imagePath(i, kind string) string {
 	return ""
 }
 func (a *App) imageTag(i, kind, p string) string {
-	var secret string
-	a.db.QueryRow("SELECT v FROM settings WHERE k='image_secret'").Scan(&secret)
+	secret := a.cursorSecret
+	if secret == "" {
+		a.db.QueryRow("SELECT v FROM settings WHERE k='image_secret'").Scan(&secret)
+	}
 	revision := p
 	if p == "cover" {
 		var b []byte

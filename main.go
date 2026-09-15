@@ -36,6 +36,7 @@ type App struct {
 	scanResume    chan struct{}
 	pages         pageCache
 	cursorSecret  string
+	proxyDebug    proxyDebugState
 	activity      activityState
 	probes        probeState
 	db            *Database
@@ -214,6 +215,10 @@ func (a *App) userDTO(u User) M {
 
 // Some clients join an /emby base URL with an already prefixed API path.
 func embyPath(p string) string {
+	// Normalize duplicate API separators without redirecting POST requests.
+	for strings.Contains(p, "//") {
+		p = strings.ReplaceAll(p, "//", "/")
+	}
 	p = strings.TrimRight(p, "/")
 	for strings.HasPrefix(strings.ToLower(p), "/emby/") {
 		p = p[5:]
@@ -277,6 +282,9 @@ func (a *App) serverInfo() M {
 	return M{"Id": a.serverID, "ServerName": a.displayName(), "Version": "4.8.0.80", "OperatingSystem": "Linux", "ProductName": "Go Emby STRM", "LocalAddress": os.Getenv("PUBLIC_URL"), "WanAddress": os.Getenv("PUBLIC_URL"), "LocalAddresses": []string{os.Getenv("PUBLIC_URL")}, "RemoteAddresses": []string{os.Getenv("PUBLIC_URL")}, "StartupWizardCompleted": true, "SupportsLibraryMonitor": false, "HasUpdateAvailable": false}
 }
 func (a *App) serve(w http.ResponseWriter, r *http.Request) {
+	if done := a.beginProxyDebug(&w, r); done != nil {
+		defer done()
+	}
 	if isVideoRequest(r.URL.Path) || strings.Contains(strings.ToLower(r.URL.Path), "/playbackinfo") {
 		tracked := &errorResponse{ResponseWriter: w, status: 200}
 		w = tracked
@@ -681,6 +689,10 @@ func (a *App) admin(w http.ResponseWriter, r *http.Request, u User, p string) {
 		defer a.write.Unlock()
 	}
 	switch p {
+	case "/admin/media-info/restore":
+		a.restoreMediaInfo(w, r)
+	case "/admin/media-item":
+		a.manageMediaItem(w, r)
 	case "/admin/enhancements":
 		a.enhancementSettings(w, r)
 	case "/admin/media-info":
@@ -1138,11 +1150,18 @@ func (a *App) items(w http.ResponseWriter, r *http.Request, u User, latest bool)
 		where, args = a.mergeWhere(where, args)
 	}
 	limit, _ := strconv.Atoi(q(r, "Limit"))
+	maxLimit := 200
+	if p, err := a.item(parent); parent != "" && err == nil && (p.Kind == "Series" || p.Kind == "Season") {
+		maxLimit = 10000
+		if limit < 1 {
+			limit = maxLimit
+		}
+	}
 	if limit < 1 {
 		limit = 60
 	}
-	if limit > 200 {
-		limit = 200
+	if limit > maxLimit {
+		limit = maxLimit
 	}
 	order := browseOrder(r)
 	if latest {
@@ -1260,8 +1279,8 @@ func (a *App) stream(w http.ResponseWriter, r *http.Request, u User, i string) {
 			return
 		}
 	}
-	if !u.API && os.Getenv("XIAOYA_URL") != "" && xiaoyaSource(x.URL) {
-		a.resolveXiaoya(w, r, x)
+	if endpoint := strmResolver(x.URL); !u.API && endpoint != "" {
+		a.resolveSTRM(w, r, x, endpoint)
 		return
 	}
 	if !u.API && os.Getenv("NANSHARE_URL") != "" {

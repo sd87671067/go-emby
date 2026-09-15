@@ -114,7 +114,11 @@ func (a *App) enrich(x Item, m M) {
 	m["Genres"] = append([]string{}, n.Genres...)
 	studios := []M{}
 	for _, s := range n.Studios {
-		studios = append(studios, M{"Name": s})
+		if name := strings.TrimSpace(s); name != "" {
+			// Keep stable numeric IDs exact in both int64 and JavaScript clients.
+			studioID, _ := strconv.ParseInt(digest("studio:" + name)[:13], 16, 64)
+			studios = append(studios, M{"Name": name, "Id": studioID})
+		}
 	}
 	m["Studios"] = studios
 	ids := M{}

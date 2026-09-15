@@ -43,7 +43,7 @@ onUnmounted(()=>{clearTimeout(timer);clearTimeout(toastTimer);controller?.abort(
 <div class="min-h-screen">
 <header class="surface sticky top-0 z-20 border-x-0 border-t-0 shadow-sm">
  <div class="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3 sm:px-8">
-  <a href="/" class="icon-btn" title="返回影库" aria-label="返回影库"><ArrowLeft/></a>
+  <a href="/#admin" class="icon-btn" title="返回后台管理" aria-label="返回后台管理"><ArrowLeft/></a>
   <div class="mr-auto flex items-center gap-3"><span class="rounded-2xl bg-indigo-600 p-3 text-white"><Folder/></span><div><h1 class="text-lg font-semibold tracking-tight">文件管理</h1><p class="text-xs text-slate-500">go-emby · 媒体空间</p></div></div>
   <button class="icon-btn" :title="dark?'切换浅色主题':'切换深色主题'" :aria-label="dark?'切换浅色主题':'切换深色主题'" @click="dark=!dark"><Sun v-if="dark"/><Moon v-else/></button>
   <div v-if="auth" class="flex w-full items-center gap-2 rounded-2xl bg-slate-100 px-3 dark:bg-slate-800 sm:order-none sm:ml-6 sm:w-auto sm:flex-1 sm:max-w-xl">

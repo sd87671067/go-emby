@@ -17,6 +17,7 @@ func (a *App) extraSchema() error {
  CREATE TABLE IF NOT EXISTS resume_activity(user_id TEXT REFERENCES users(id) ON DELETE CASCADE,item TEXT REFERENCES items(id) ON DELETE CASCADE,updated BIGINT NOT NULL,PRIMARY KEY(user_id,item));
  CREATE TABLE IF NOT EXISTS media_probe(item TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,source TEXT NOT NULL,data TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS media_probe_source_idx ON media_probe(source);
+ CREATE TABLE IF NOT EXISTS media_display_names(item TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,name TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS covers(id TEXT PRIMARY KEY,mime TEXT NOT NULL,data BYTEA NOT NULL);`)
 	return e
 }

@@ -190,7 +190,7 @@ func (a *App) scanLibraryScoped(lib string, incremental, allowEmpty bool, scopes
 		if e != nil {
 			return e
 		}
-		stmt, e = tx.Prepare(`INSERT INTO items(` + cols + `,seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET parent=excluded.parent,name=excluded.name,kind=excluded.kind,url=excluded.url,overview=excluded.overview,poster=excluded.poster,year=excluded.year,season=excluded.season,episode=excluded.episode,mtime=excluded.mtime,size=excluded.size,seen=excluded.seen`)
+		stmt, e = tx.Prepare(`INSERT INTO items(` + cols + `,seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET parent=excluded.parent,name=COALESCE((SELECT name FROM media_display_names WHERE item=excluded.id),excluded.name),kind=excluded.kind,url=excluded.url,overview=excluded.overview,poster=excluded.poster,year=excluded.year,season=excluded.season,episode=excluded.episode,mtime=excluded.mtime,size=excluded.size,seen=excluded.seen`)
 		return e
 	}
 	flush := func() error {

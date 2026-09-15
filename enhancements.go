@@ -13,7 +13,7 @@ func (a *App) defaultOn(key string) bool {
 }
 func (a *App) hideMissingActors() bool { return a.defaultOn("hide_missing_actor_images") }
 func (a *App) enhancementValues() M {
-	return M{"ThirdPartyProxyPorts": a.thirdPartyProxyPorts(), "FastCDN": a.defaultOn("fast_cdn"), "WatchEnabled": a.defaultOn("watch_enabled"), "ScanConcurrency": a.jobLimit(false), "UpdateConcurrency": a.jobLimit(true), "ServerName": a.displayName(), "WatchDelaySeconds": a.watchDelay(), "SearchByInitials": a.defaultOn("search_by_initials"), "HideMissingActorImages": a.hideMissingActors(), "MergeVersionsInFolder": a.defaultOn("merge_versions_folder"), "MergeVersionsAcrossLibraries": a.defaultOn("merge_versions_libraries")}
+	return M{"ProxyDebug": a.proxyDebugEnabled(), "ThirdPartyProxyPorts": a.thirdPartyProxyPorts(), "FastCDN": a.defaultOn("fast_cdn"), "WatchEnabled": a.defaultOn("watch_enabled"), "ScanConcurrency": a.jobLimit(false), "UpdateConcurrency": a.jobLimit(true), "ServerName": a.displayName(), "WatchDelaySeconds": a.watchDelay(), "SearchByInitials": a.defaultOn("search_by_initials"), "HideMissingActorImages": a.hideMissingActors(), "MergeVersionsInFolder": a.defaultOn("merge_versions_folder"), "MergeVersionsAcrossLibraries": a.defaultOn("merge_versions_libraries")}
 }
 func (a *App) enhancementSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
@@ -25,6 +25,7 @@ func (a *App) enhancementSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
+		ProxyDebug                                                                                                           *bool
 		ThirdPartyProxyPorts                                                                                                 *[]int
 		ScanConcurrency, UpdateConcurrency                                                                                   *int
 		ServerName                                                                                                           *string
@@ -34,7 +35,7 @@ func (a *App) enhancementSettings(w http.ResponseWriter, r *http.Request) {
 	if !body(w, r, &b) {
 		return
 	}
-	if b.ThirdPartyProxyPorts == nil && b.FastCDN == nil && b.WatchEnabled == nil && b.SearchByInitials == nil && b.HideMissingActorImages == nil && b.MergeVersionsInFolder == nil && b.MergeVersionsAcrossLibraries == nil && b.WatchDelaySeconds == nil && b.ScanConcurrency == nil && b.UpdateConcurrency == nil && b.ServerName == nil {
+	if b.ProxyDebug == nil && b.ThirdPartyProxyPorts == nil && b.FastCDN == nil && b.WatchEnabled == nil && b.SearchByInitials == nil && b.HideMissingActorImages == nil && b.MergeVersionsInFolder == nil && b.MergeVersionsAcrossLibraries == nil && b.WatchDelaySeconds == nil && b.ScanConcurrency == nil && b.UpdateConcurrency == nil && b.ServerName == nil {
 		fail(w, 400, "缺少增强功能设置")
 		return
 	}
@@ -75,7 +76,7 @@ func (a *App) enhancementSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	for k, v := range map[string]*bool{"fast_cdn": b.FastCDN, "watch_enabled": b.WatchEnabled, "search_by_initials": b.SearchByInitials, "hide_missing_actor_images": b.HideMissingActorImages, "merge_versions_folder": b.MergeVersionsInFolder, "merge_versions_libraries": b.MergeVersionsAcrossLibraries} {
+	for k, v := range map[string]*bool{"proxy_debug": b.ProxyDebug, "fast_cdn": b.FastCDN, "watch_enabled": b.WatchEnabled, "search_by_initials": b.SearchByInitials, "hide_missing_actor_images": b.HideMissingActorImages, "merge_versions_folder": b.MergeVersionsInFolder, "merge_versions_libraries": b.MergeVersionsAcrossLibraries} {
 		if v == nil {
 			continue
 		}

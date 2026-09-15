@@ -63,6 +63,10 @@ func (a *App) finishActivity(key string, err error) {
 	})
 }
 func (a *App) activitySnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("category") == "proxy" {
+		a.proxyDebugLogs(w, r)
+		return
+	}
 	if r.Method == "DELETE" {
 		a.activity.mu.Lock()
 		for _, v := range a.activity.entries {

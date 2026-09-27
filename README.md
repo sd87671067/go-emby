@@ -1,12 +1,44 @@
 # go-emby
 
-Go 编写的 Emby 服务端，包含 Web 管理界面、文件浏览、媒体库扫描、NFO/海报读取和 Emby 兼容接口。播放采用跳转方式，客户端直连媒体源，不提供视频转码。
+Go 编写的 Emby 兼容媒体服务器，提供 Web 管理界面和常用媒体库管理能力。播放采用跳转方式，客户端直连媒体源，不提供视频转码。
 
 支持 **Linux x64 / amd64** 和 **ARM64 / aarch64**。
 
-## Docker Compose 部署
+## 功能介绍
 
-服务器需要提前安装 **Docker Engine** 和 **Docker Compose v2**。
+- Emby 兼容接口，可连接常用 Emby 客户端
+- Web 媒体库、海报墙、影视详情与播放管理
+- 媒体库全量扫描、增量刷新与目录管理
+- NFO、本地海报及媒体元数据读取
+- 媒体信息提取与管理
+- TMDB 元数据与刮削管理
+- 外挂字幕增强
+- 用户、播放权限与设备数量管理
+- 文件管理
+- 实时日志与后台管理
+- Docker Compose 部署
+- 多架构镜像：amd64 / arm64
+- 播放使用重定向/直连媒体源，不进行视频转码
+
+## 部署方式一：一键部署
+
+服务器需要提前安装 Docker Engine 和 Docker Compose v2。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sd87671067/go-emby/main/install.sh | bash
+```
+
+安装脚本会引导完成部署配置。
+
+安装完成后访问：
+
+```text
+http://服务器IP:8097
+```
+
+请妥善保存管理员密码、数据库密码和授权信息。
+
+## 部署方式二：Docker Compose
 
 ### 1. 创建部署目录
 
@@ -14,7 +46,7 @@ Go 编写的 Emby 服务端，包含 Web 管理界面、文件浏览、媒体库
 mkdir -p ~/go-emby && cd ~/go-emby
 ```
 
-### 2. 下载配置文件
+### 2. 下载 compose.yaml 和 .env.example
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.yaml
@@ -31,9 +63,9 @@ POSTGRES_PASSWORD=你的数据库密码
 ADMIN_PASSWORD=你的管理员密码
 ```
 
-建议使用强密码。管理员初始密码至少 12 个字符。
+管理员初始密码至少 12 个字符。
 
-然后根据服务器实际媒体目录修改 `compose.yaml` 中的媒体挂载，例如：
+根据服务器实际媒体目录修改 `compose.yaml` 中的媒体挂载，例如：
 
 ```yaml
 - /vol1/1000/strm:/media:rw
@@ -43,7 +75,7 @@ ADMIN_PASSWORD=你的管理员密码
 
 如果增加多个容器内媒体目录，请同步修改 `.env` 中的 `MEDIA_ROOTS`。
 
-### 4. 启动
+### 4. 拉取镜像并启动
 
 ```bash
 docker compose pull && docker compose up -d
@@ -55,7 +87,7 @@ docker compose pull && docker compose up -d
 http://服务器IP:8097
 ```
 
-查看容器状态：
+查看状态：
 
 ```bash
 docker compose ps
@@ -67,36 +99,23 @@ docker compose ps
 docker compose logs --tail=100 go-emby
 ```
 
-> 不要执行 `docker compose down -v`，否则可能删除 PostgreSQL 数据。
+> 不要执行 `docker compose down -v`，否则可能删除 PostgreSQL 数据卷。
 
 ## 更新
 
-进入部署目录：
-
-```bash
-cd ~/go-emby
-```
-
-如仓库中的部署配置有更新，可重新下载模板并按需合并自己的配置；**不要直接覆盖已经填写好的 `.env`**。
-
-更新程序镜像并重新创建容器：
+进入部署目录后执行：
 
 ```bash
 docker compose pull && docker compose up -d
 ```
 
-已有 `.env`、媒体目录、`app-data` 和 PostgreSQL 数据会继续保留。
+更新只拉取新镜像并重新创建容器，已有 `.env`、媒体目录、`app-data` 和 PostgreSQL 数据会继续保留。
 
-更新后检查：
-
-```bash
-docker compose ps
-docker compose logs --tail=100 go-emby
-```
+如果仓库中的 `compose.yaml` 或 `.env.example` 有更新，可以重新下载模板后手动合并配置。**不要直接用 `.env.example` 覆盖已经配置好的 `.env`。**
 
 ## 配置说明
 
-完整环境变量说明：
+完整环境变量和配置说明：
 
 [ENV_GUIDE.md](ENV_GUIDE.md)
 
@@ -120,7 +139,9 @@ docker compose logs --tail=100 go-emby
 https://tl.macacaaca.top
 ```
 
-当前提供免费模式，`LICENSE_KEY` 可按实际授权方式配置。主机机器标识会用于授权设备绑定，迁移服务器后可能需要重新授权。
+当前提供免费模式，`LICENSE_KEY` 可按实际授权方式配置；授权相关配置请参考 [ENV_GUIDE.md](ENV_GUIDE.md)。
+
+主机机器标识会用于授权设备绑定，迁移服务器后可能需要重新授权。
 
 ## 交流群
 

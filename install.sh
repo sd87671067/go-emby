@@ -40,16 +40,14 @@ old_compose=false
 old_host_compose=false
 old_env=false
 deployment_started=false
-db_dir_owner=
-db_dir_mode=
 rollback() {
     local exit_code=$?
     trap - EXIT
     if [[ "$migration_pending" == true ]]; then
         echo '迁移或启动失败，正在恢复原部署；旧 named volume 保持不变。' >&2
-        docker compose --env-file .env -f compose.yaml stop go-emby postgres >/dev/null 2>&1 || true
+        docker compose --env-file .env "${compose_files[@]}" stop go-emby postgres >/dev/null 2>&1 || true
         local postgres_container
-        postgres_container=$(docker compose --env-file .env -f compose.yaml ps -q postgres 2>/dev/null || true)
+        postgres_container=$(docker compose --env-file .env "${compose_files[@]}" ps -q postgres 2>/dev/null || true)
         if [[ -n "$postgres_container" && $(docker inspect -f '{{.State.Running}}' "$postgres_container" 2>/dev/null || true) == true ]]; then
             echo 'PostgreSQL 仍在运行，未清理复制目录；请先手动停止容器。' >&2
             rm -rf "$tmp_dir"
@@ -64,14 +62,10 @@ rollback() {
         if [[ "$old_env" == true ]]; then
             cp -a "$tmp_dir/.env.old" .env
         fi
-        # 迁移前已确认该目录为空，故这里只清理本次复制的内容。
-        find "$INSTALL_DIR/postgres-data" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-        if [[ -n "$db_dir_owner" && -n "$db_dir_mode" ]]; then
-            chown "$db_dir_owner" "$INSTALL_DIR/postgres-data"
-            chmod "$db_dir_mode" "$INSTALL_DIR/postgres-data"
-        fi
+        # 保留复制出的文件供检查；安装脚本绝不删除数据库目录或其中的数据。
+        echo 'postgres-data 中已复制的文件仍保留；排查后再重试迁移。' >&2
         if [[ "$old_compose" == true ]]; then
-            docker compose --env-file .env -f compose.yaml up -d >/dev/null 2>&1 || \
+            docker compose --env-file .env "${compose_files[@]}" up -d >/dev/null 2>&1 || \
                 echo '旧配置已恢复，但旧服务未能自动启动；请检查 docker compose logs。' >&2
         fi
         echo '安装已停止。原数据库仍在 go-emby_postgres-data。' >&2
@@ -126,11 +120,6 @@ set_env() {
         printf '%s=%s\n' "$key" "$value" >> .env
     fi
 }
-ensure_env() {
-    if ! grep -q "^${1}=" .env; then
-        set_env "$1" "$2"
-    fi
-}
 get_env() {
     sed -n "s/^${1}=//p" .env | tail -n 1 | sed -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//'
 }
@@ -138,24 +127,33 @@ if [[ "$new_install" == true ]]; then
     set_env POSTGRES_PASSWORD "$(openssl rand -hex 24)"
     set_env ADMIN_PASSWORD "$(openssl rand -hex 24)"
 fi
-ensure_env APP_DATA_PATH ./app-data
-ensure_env APP_BACKUP_PATH ./app-backups
-set_env POSTGRES_DATA_PATH ./postgres-data
-ensure_env MEDIA_PATH ./media
-set_env NETWORK_MODE bridge
-ensure_env HTTP_PORT 8097
+# 已有 .env 原样保留；缺省目录及端口由 Compose 模板提供。
 chmod 600 .env
 POSTGRES_PASSWORD=$(get_env POSTGRES_PASSWORD)
 ADMIN_PASSWORD=$(get_env ADMIN_PASSWORD)
 HTTP_PORT=$(get_env HTTP_PORT)
+HTTP_PORT=${HTTP_PORT:-8097}
+NETWORK_MODE=$(get_env NETWORK_MODE)
+POSTGRES_DATA_PATH=$(get_env POSTGRES_DATA_PATH)
 if [[ -z "$POSTGRES_PASSWORD" || ${#ADMIN_PASSWORD} -lt 12 ]]; then
     echo 'POSTGRES_PASSWORD 不能为空，ADMIN_PASSWORD 至少 12 个字符。' >&2
     exit 1
 fi
+if [[ -n "$POSTGRES_DATA_PATH" && "$POSTGRES_DATA_PATH" != ./postgres-data ]]; then
+    echo '一键部署只能管理 ./postgres-data；现有 POSTGRES_DATA_PATH 不同，安装停止以保护数据库。' >&2
+    exit 1
+fi
+compose_files=(-f compose.yaml)
+if [[ "$NETWORK_MODE" == host ]]; then
+    compose_files+=(-f compose.host.yaml)
+    HTTP_PORT=8097
+elif [[ -n "$NETWORK_MODE" && "$NETWORK_MODE" != bridge ]]; then
+    echo 'NETWORK_MODE 必须为 bridge 或 host。' >&2
+    exit 1
+fi
 mkdir -p app-data app-backups postgres-data media secrets
-chmod 700 secrets
 
-docker compose --env-file .env -f compose.yaml config --quiet
+docker compose --env-file .env "${compose_files[@]}" config --quiet
 docker pull "$POSTGRES_IMAGE"
 postgres_uid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -u postgres)
 postgres_gid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -g postgres)
@@ -177,12 +175,14 @@ elif docker volume inspect go-emby_postgres-data >/dev/null 2>&1; then
         exit 1
     fi
     echo '检测到旧 named volume 数据，开始迁移。'
-    db_dir_owner=$(stat -c '%u:%g' "$db_dir")
-    db_dir_mode=$(stat -c '%a' "$db_dir")
     migration_pending=true
     if [[ "$old_compose" == true ]]; then
+        old_compose_files=(-f "$tmp_dir/compose.yaml.old")
+        if [[ "$NETWORK_MODE" == host && "$old_host_compose" == true ]]; then
+            old_compose_files+=(-f "$tmp_dir/compose.host.yaml.old")
+        fi
         docker compose --project-directory "$INSTALL_DIR" --env-file .env \
-            -f "$tmp_dir/compose.yaml.old" stop go-emby postgres
+            "${old_compose_files[@]}" stop go-emby postgres
     else
         echo '存在旧数据库卷，但找不到原 compose.yaml；无法确认数据库已停止。' >&2
         exit 1
@@ -206,10 +206,10 @@ fi
 chown "${postgres_uid}:${postgres_gid}" "$db_dir"
 chmod 700 "$db_dir"
 
-docker compose --env-file .env -f compose.yaml pull
+docker compose --env-file .env "${compose_files[@]}" pull
 deployment_started=true
-docker compose --env-file .env -f compose.yaml up -d postgres
-postgres_id=$(docker compose --env-file .env -f compose.yaml ps -q postgres)
+docker compose --env-file .env "${compose_files[@]}" up -d postgres
+postgres_id=$(docker compose --env-file .env "${compose_files[@]}" ps -q postgres)
 if [[ -z "$postgres_id" ]]; then
     echo 'PostgreSQL 容器未创建。' >&2
     exit 1
@@ -226,24 +226,51 @@ if [[ "$healthy" != true ]]; then
     echo 'PostgreSQL 健康检查失败。' >&2
     exit 1
 fi
-if [[ $(docker compose --env-file .env -f compose.yaml exec -T \
+if [[ $(docker compose --env-file .env "${compose_files[@]}" exec -T \
     -e "PGPASSWORD=${POSTGRES_PASSWORD}" postgres \
     psql -h 127.0.0.1 -U emby -d emby -Atqc 'SELECT 1') != 1 ]]; then
     echo 'PostgreSQL SELECT 1 验证失败，请检查现有数据库密码。' >&2
     exit 1
 fi
-docker compose --env-file .env -f compose.yaml up -d --remove-orphans go-emby
+docker compose --env-file .env "${compose_files[@]}" up -d --remove-orphans go-emby
+app_id=$(docker compose --env-file .env "${compose_files[@]}" ps -q go-emby)
+if [[ -z "$app_id" ]]; then
+    echo 'go-emby 容器未创建。' >&2
+    exit 1
+fi
+container_owns_listen_port() {
+    local pid port_hex inode fd
+    pid=$(docker inspect -f '{{.State.Pid}}' "$app_id" 2>/dev/null || true)
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    port_hex=$(printf '%04X' "$HTTP_PORT")
+    while read -r inode; do
+        for fd in "/proc/$pid/fd/"*; do
+            if [[ $(readlink "$fd" 2>/dev/null || true) == "socket:[$inode]" ]]; then
+                return 0
+            fi
+        done
+    done < <(awk -v port="$port_hex" '$4 == "0A" && toupper($2) ~ ":" port "$" {print $10}' \
+        "/proc/$pid/net/tcp" "/proc/$pid/net/tcp6" 2>/dev/null)
+    return 1
+}
 ready=false
 for ((i=0; i<60; i++)); do
-    if curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/health" >/dev/null 2>&1; then
-        ready=true
-        break
+    state_before=$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$app_id" 2>/dev/null || true)
+    if [[ "$state_before" == true\ * ]] && \
+        curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/health" >/dev/null 2>&1 && \
+        { [[ "$NETWORK_MODE" != host ]] || container_owns_listen_port; }; then
+        sleep 2
+        state_after=$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$app_id" 2>/dev/null || true)
+        if [[ "$state_after" == "$state_before" ]]; then
+            ready=true
+            break
+        fi
     fi
     sleep 2
 done
 if [[ "$ready" != true ]]; then
     echo 'go-emby 健康检查失败。' >&2
-    docker compose --env-file .env -f compose.yaml logs --tail=50 go-emby >&2 || true
+    docker compose --env-file .env "${compose_files[@]}" logs --tail=50 go-emby >&2 || true
     exit 1
 fi
 migration_pending=false

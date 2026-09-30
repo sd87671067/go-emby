@@ -28,7 +28,7 @@ Go 编写的 Emby 兼容媒体服务器，提供 Web 管理界面和常用媒体
 curl -fsSL https://raw.githubusercontent.com/sd87671067/go-emby/main/install.sh | bash
 ```
 
-全程无需交互。默认使用 Bridge 网络，Web 端口为 8097。脚本会等待 PostgreSQL 与 go-emby 健康检查通过，并打印管理员密码。
+全程无需交互。脚本自动完成密码生成、目录创建、权限设置、数据库初始化、服务启动和健康检查，并显示管理员密码。默认使用 Bridge 网络，Web 端口为 8097。
 
 安装完成后访问：
 
@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/sd87671067/go-emby/main/install.sh 
 http://服务器IP:8097
 ```
 
-数据库密码保存在权限为 `600` 的 `/opt/go-emby/.env` 中。媒体目录默认为 `/opt/go-emby/media`；接入已有媒体库时，可在安装后把 `.env` 中的 `MEDIA_PATH` 改为实际路径，再运行 `docker compose up -d`。
+使用账号 `admin` 和安装脚本显示的密码登录即可。数据库密码不会显示在终端，保存在权限为 `600` 的 `/opt/go-emby/.env` 中。脚本已创建可读写的 `/opt/go-emby/media` 并挂载到容器的 `/media`；以后可在 Web 中添加 `/media` 作为媒体库。
 
 默认目录结构：
 
@@ -52,7 +52,7 @@ http://服务器IP:8097
 └── secrets/
 ```
 
-旧版若使用 `go-emby_postgres-data` 数据卷，重新运行脚本会先停止服务并复制数据库到 `./postgres-data`，验证数据库可用后保留旧卷作为回滚备份。若迁移失败，脚本会恢复旧配置并停止安装。
+重复运行安装命令会保留 `.env`、密码及所有数据目录，仅更新 Compose 模板和镜像。现有数据库会使用 `.env` 中的密码执行 `SELECT 1` 验证；验证失败立即停止，不会重建数据库。旧版若使用 `go-emby_postgres-data` 数据卷，脚本会先停止服务并迁移到 `./postgres-data`，旧卷仍保留。
 
 ## 部署方式二：Docker Compose
 
@@ -66,24 +66,24 @@ mkdir -p ~/go-emby && cd ~/go-emby
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.yaml
-curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.host.yaml
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/.env.example
 cp .env.example .env
+mkdir -p app-data app-backups postgres-data media secrets
 ```
 
 ### 3. 修改配置
 
-编辑 `.env`，至少填写：
+编辑 `.env`，只需填写以下三项（`MEDIA_PATH=./media` 已是默认值）：
 
 ```env
 POSTGRES_PASSWORD=你的数据库密码
 ADMIN_PASSWORD=你的管理员密码
+MEDIA_PATH=./media
 ```
 
 管理员初始密码至少 12 个字符。
 
-在 `.env` 中可设置已有的宿主机媒体目录，例如 `MEDIA_PATH=/vol1/1000/Emby`。使用默认 `MEDIA_PATH=./media` 时，先执行 `mkdir -p media`。
-容器内媒体目录固定为 `/media`，`MEDIA_ROOTS=/media` 无需随宿主机路径修改。
+`MEDIA_PATH` 是宿主机路径，也可设为 `/vol1/1000/Emby` 或 `/mnt/media`，该目录应已存在；不必修改 `compose.yaml`。容器内统一挂载为可读写的 `/media`，`MEDIA_ROOTS=/media` 无需随宿主机路径修改。可选配置有 `HTTP_PORT`、`NETWORK_MODE`、`PUID`、`PGID` 和 `POSTGRES_HOST_PORT`。go-emby 默认使用 `PUID=0`、`PGID=0`；不会递归修改外部媒体库的权限。
 
 `APP_DATA_PATH=./app-data`、`APP_BACKUP_PATH=./app-backups` 和 `POSTGRES_DATA_PATH=./postgres-data` 默认都位于当前 Compose 项目目录。手动部署首次启动前，先从官方镜像查询 PostgreSQL UID/GID 并设置数据库目录权限：
 
@@ -91,7 +91,6 @@ ADMIN_PASSWORD=你的管理员密码
 docker pull postgres:17-bookworm
 PG_UID=$(docker run --rm --entrypoint id postgres:17-bookworm -u postgres)
 PG_GID=$(docker run --rm --entrypoint id postgres:17-bookworm -g postgres)
-mkdir -p postgres-data
 sudo chown "$PG_UID:$PG_GID" postgres-data
 sudo chmod 700 postgres-data
 ```
@@ -100,12 +99,13 @@ sudo chmod 700 postgres-data
 
 如果增加多个容器内媒体目录，请同步修改 `.env` 中的 `MEDIA_ROOTS`。
 
-如需 Host 网络，使用 `docker compose -f compose.yaml -f compose.host.yaml up -d`。Host 模式仅改变 go-emby 的网络、端口和数据库连接地址；PostgreSQL 始终使用同一个 `./postgres-data` 目录，宿主机端口仅绑定 `127.0.0.1`。Bridge 模式下 go-emby 连接 `postgres:5432`。
+PostgreSQL 目录权限以上述官方镜像实际 UID/GID 为准，不要使用 `chmod 777`。应用数据、备份和 `secrets` 目录使用当前用户可写的权限即可。
 
 ### 4. 拉取镜像并启动
 
 ```bash
-docker compose pull && docker compose up -d
+docker compose pull
+docker compose up -d
 ```
 
 启动完成后访问：
@@ -126,14 +126,46 @@ docker compose ps
 docker compose logs --tail=100 go-emby
 ```
 
-数据库、应用数据、备份和默认媒体目录均可在项目目录中统一备份或迁移。备份数据库文件前，请先停止 PostgreSQL。
+默认 Bridge 网络（推荐）。如需 Host 网络，先下载覆盖文件，将 `.env` 中的 `NETWORK_MODE` 设为 `host`，然后执行：
+
+```bash
+curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.host.yaml
+docker compose -f compose.yaml -f compose.host.yaml pull
+docker compose -f compose.yaml -f compose.host.yaml up -d
+```
+
+`NETWORK_MODE=host` 仅记录所选模式；Host 模式必须在每次 Compose 命令中带上 `-f compose.host.yaml`。PostgreSQL 仍在 Bridge 网络中，供应用使用的数据库端口仅绑定 `127.0.0.1`。
+
+默认目录结构如下。所有数据都在 `go-emby/` 内，方便整体备份和迁移：
+
+```text
+go-emby/
+├── compose.yaml
+├── compose.host.yaml  # 仅 Host 模式下载
+├── .env
+├── app-data/
+├── app-backups/
+├── postgres-data/
+├── media/
+└── secrets/
+```
+
+备份前建议先执行 `docker compose down`（Host 模式使用相同的两个 `-f` 参数），再备份整个 `go-emby/` 目录。恢复时还原整个目录，再执行 `docker compose up -d`（Host 模式仍使用两个 `-f` 参数）。不要使用 `docker compose down -v`。
 
 ## 更新
 
-进入部署目录后执行：
+进入部署目录后，Bridge 模式执行：
 
 ```bash
-docker compose pull && docker compose up -d
+docker compose pull
+docker compose up -d
+```
+
+Host 模式执行：
+
+```bash
+docker compose -f compose.yaml -f compose.host.yaml pull
+docker compose -f compose.yaml -f compose.host.yaml up -d
 ```
 
 更新只拉取新镜像并重新创建容器，已有 `.env`、媒体目录、`app-data` 和 PostgreSQL 数据会继续保留。

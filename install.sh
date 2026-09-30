@@ -40,9 +40,21 @@ old_compose=false
 old_host_compose=false
 old_env=false
 deployment_started=false
+failure_stage='安装准备'
 rollback() {
     local exit_code=$?
     trap - EXIT
+    if (( exit_code != 0 )); then
+        echo "ERROR: ${failure_stage} failed (exit code ${exit_code})." >&2
+        if [[ "$deployment_started" == true ]]; then
+            local app_container
+            app_container=$(docker compose --env-file .env "${compose_files[@]}" ps -a -q go-emby </dev/null 2>/dev/null || true)
+            if [[ -n "$app_container" ]]; then
+                docker inspect -f 'go-emby state={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$app_container" >&2 || true
+                docker compose --env-file .env "${compose_files[@]}" logs --tail=100 go-emby </dev/null >&2 || true
+            fi
+        fi
+    fi
     if [[ "$migration_pending" == true ]]; then
         echo '迁移或启动失败，正在恢复原部署；旧 named volume 保持不变。' >&2
         docker compose --env-file .env "${compose_files[@]}" stop go-emby postgres >/dev/null 2>&1 || true
@@ -84,6 +96,13 @@ rollback() {
     exit "$exit_code"
 }
 trap rollback EXIT
+run_quiet() {
+    if "$@" </dev/null >"$tmp_dir/command.log" 2>&1; then
+        return 0
+    fi
+    cat "$tmp_dir/command.log" >&2
+    return 1
+}
 
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
@@ -135,8 +154,13 @@ HTTP_PORT=$(get_env HTTP_PORT)
 HTTP_PORT=${HTTP_PORT:-8097}
 NETWORK_MODE=$(get_env NETWORK_MODE)
 POSTGRES_DATA_PATH=$(get_env POSTGRES_DATA_PATH)
-if [[ -z "$POSTGRES_PASSWORD" || ${#ADMIN_PASSWORD} -lt 12 ]]; then
-    echo 'POSTGRES_PASSWORD 不能为空，ADMIN_PASSWORD 至少 12 个字符。' >&2
+admin_password_bytes=$(printf '%s' "$ADMIN_PASSWORD" | wc -c)
+if [[ -z "$POSTGRES_PASSWORD" || $admin_password_bytes -lt 12 ]]; then
+    echo 'POSTGRES_PASSWORD 不能为空，ADMIN_PASSWORD 至少 12 字节。' >&2
+    exit 1
+fi
+if (( admin_password_bytes > 72 )); then
+    echo 'ADMIN_PASSWORD 不能超过 72 字节。' >&2
     exit 1
 fi
 if [[ -n "$POSTGRES_DATA_PATH" && "$POSTGRES_DATA_PATH" != ./postgres-data ]]; then
@@ -152,11 +176,19 @@ elif [[ -n "$NETWORK_MODE" && "$NETWORK_MODE" != bridge ]]; then
     exit 1
 fi
 mkdir -p app-data app-backups postgres-data media secrets
+MEDIA_PATH=$(get_env MEDIA_PATH)
+if [[ -n "$MEDIA_PATH" && ! -d "$MEDIA_PATH" ]]; then
+    echo "ERROR: media bind mount invalid: ${MEDIA_PATH} 目录不存在。" >&2
+    exit 1
+fi
 
+failure_stage='Compose 配置解析'
 docker compose --env-file .env "${compose_files[@]}" config --quiet
-docker pull "$POSTGRES_IMAGE"
-postgres_uid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -u postgres)
-postgres_gid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -g postgres)
+failure_stage='PostgreSQL 镜像拉取'
+run_quiet docker pull "$POSTGRES_IMAGE"
+failure_stage='PostgreSQL UID/GID 查询'
+postgres_uid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -u postgres </dev/null)
+postgres_gid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -g postgres </dev/null)
 if [[ ! "$postgres_uid" =~ ^[0-9]+$ || ! "$postgres_gid" =~ ^[0-9]+$ ]]; then
     echo '无法从 postgres:17-bookworm 查询 postgres 用户的 UID/GID。' >&2
     exit 1
@@ -203,13 +235,26 @@ elif docker volume inspect go-emby_postgres-data >/dev/null 2>&1; then
     echo '旧数据库已复制到 ./postgres-data；旧卷保留作为回滚备份。'
 fi
 # 只调整 PostgreSQL 目录本身；数据库文件保持原来的 owner/permission。
+failure_stage='postgres-data 目录权限设置'
 chown "${postgres_uid}:${postgres_gid}" "$db_dir"
 chmod 700 "$db_dir"
+if [[ -f "$db_dir/PG_VERSION" ]]; then
+    failure_stage='postgres-data 文件权限检查'
+    if ! docker run --rm --user "${postgres_uid}:${postgres_gid}" \
+        --entrypoint sh -v "$db_dir:/data:ro" "$POSTGRES_IMAGE" \
+        -c 'test -r /data/PG_VERSION && test -x /data/base && test -x /data/global' </dev/null; then
+        echo 'ERROR: postgres-data 权限错误：PostgreSQL 用户无法读取 PG_VERSION 或访问 base/global；请检查数据库文件属主和权限。' >&2
+        exit 1
+    fi
+fi
 
-docker compose --env-file .env "${compose_files[@]}" pull
+failure_stage='go-emby image pull'
+run_quiet docker compose --env-file .env "${compose_files[@]}" pull go-emby
 deployment_started=true
-docker compose --env-file .env "${compose_files[@]}" up -d postgres
-postgres_id=$(docker compose --env-file .env "${compose_files[@]}" ps -q postgres)
+failure_stage='PostgreSQL container create'
+run_quiet docker compose --env-file .env "${compose_files[@]}" up -d postgres
+failure_stage='PostgreSQL health check'
+postgres_id=$(docker compose --env-file .env "${compose_files[@]}" ps -a -q postgres </dev/null)
 if [[ -z "$postgres_id" ]]; then
     echo 'PostgreSQL 容器未创建。' >&2
     exit 1
@@ -223,17 +268,20 @@ for ((i=0; i<60; i++)); do
     sleep 2
 done
 if [[ "$healthy" != true ]]; then
-    echo 'PostgreSQL 健康检查失败。' >&2
+    echo 'PostgreSQL 健康检查失败；请检查 postgres-data 权限和以下容器日志。' >&2
+    docker compose --env-file .env "${compose_files[@]}" logs --tail=50 postgres </dev/null >&2 || true
     exit 1
 fi
+failure_stage='PostgreSQL SELECT 1'
 if [[ $(docker compose --env-file .env "${compose_files[@]}" exec -T \
     -e "PGPASSWORD=${POSTGRES_PASSWORD}" postgres \
-    psql -h 127.0.0.1 -U emby -d emby -Atqc 'SELECT 1') != 1 ]]; then
+    psql -h 127.0.0.1 -U emby -d emby -Atqc 'SELECT 1' </dev/null) != 1 ]]; then
     echo 'PostgreSQL SELECT 1 验证失败，请检查现有数据库密码。' >&2
     exit 1
 fi
-docker compose --env-file .env "${compose_files[@]}" up -d --remove-orphans go-emby
-app_id=$(docker compose --env-file .env "${compose_files[@]}" ps -q go-emby)
+failure_stage='go-emby container create'
+run_quiet docker compose --env-file .env "${compose_files[@]}" up -d --force-recreate --remove-orphans go-emby
+app_id=$(docker compose --env-file .env "${compose_files[@]}" ps -a -q go-emby </dev/null)
 if [[ -z "$app_id" ]]; then
     echo 'go-emby 容器未创建。' >&2
     exit 1
@@ -253,10 +301,12 @@ container_owns_listen_port() {
         "/proc/$pid/net/tcp" "/proc/$pid/net/tcp6" 2>/dev/null)
     return 1
 }
+failure_stage='go-emby health check'
 ready=false
 for ((i=0; i<60; i++)); do
     state_before=$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$app_id" 2>/dev/null || true)
     if [[ "$state_before" == true\ * ]] && \
+        [[ $(docker inspect -f '{{.State.Health.Status}}' "$app_id" 2>/dev/null || true) == healthy ]] && \
         curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/health" >/dev/null 2>&1 && \
         { [[ "$NETWORK_MODE" != host ]] || container_owns_listen_port; }; then
         sleep 2
@@ -269,8 +319,12 @@ for ((i=0; i<60; i++)); do
     sleep 2
 done
 if [[ "$ready" != true ]]; then
-    echo 'go-emby 健康检查失败。' >&2
-    docker compose --env-file .env "${compose_files[@]}" logs --tail=50 go-emby >&2 || true
+    app_state=$(docker inspect -f '{{.State.Status}}' "$app_id" 2>/dev/null || true)
+    if [[ "$app_state" == exited || "$app_state" == restarting ]]; then
+        echo "ERROR: go-emby exited or is restarting (${app_state}); container state and logs follow." >&2
+    else
+        echo 'ERROR: go-emby health check failed; container state and logs follow.' >&2
+    fi
     exit 1
 fi
 migration_pending=false
@@ -278,5 +332,5 @@ public_ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
 if [[ -z "$public_ip" ]]; then
     public_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 fi
-printf '\n安装完成\n访问地址：http://%s:%s\n管理员账号：admin\n管理员密码：%s\n安装目录：%s\n' \
+printf '安装完成\n\n访问地址：\nhttp://%s:%s\n\n管理员账号：admin\n管理员密码：%s\n\n安装目录：%s\n' \
     "${public_ip:-服务器IP}" "$HTTP_PORT" "$ADMIN_PASSWORD" "$INSTALL_DIR"

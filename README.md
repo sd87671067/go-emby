@@ -54,6 +54,8 @@ http://服务器IP:8097
 
 重复运行安装命令会保留 `.env`、密码及所有数据目录，仅更新 Compose 模板和镜像。现有数据库会使用 `.env` 中的密码执行 `SELECT 1` 验证；验证失败立即停止，不会重建数据库。旧版若使用 `go-emby_postgres-data` 数据卷，脚本会先停止服务并迁移到 `./postgres-data`，旧卷仍保留。
 
+如果应用容器创建或启动失败，脚本会显示 Docker 错误及已有应用容器的状态和日志，并保留 `.env`、`postgres-data` 等数据。修复端口占用或挂载目录等问题后，直接重新运行同一安装命令即可。
+
 ## 部署方式二：Docker Compose
 
 ### 1. 创建部署目录
@@ -68,6 +70,7 @@ mkdir -p ~/go-emby && cd ~/go-emby
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.yaml
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/.env.example
 cp .env.example .env
+chmod 600 .env
 mkdir -p app-data app-backups postgres-data media secrets
 ```
 
@@ -81,7 +84,7 @@ ADMIN_PASSWORD=你的管理员密码
 MEDIA_PATH=./media
 ```
 
-管理员初始密码至少 12 个字符。
+管理员初始密码须为 12 到 72 字节。一键脚本生成 48 个 ASCII 字符的随机密码。
 
 `MEDIA_PATH` 是宿主机路径，也可设为 `/vol1/1000/Emby` 或 `/mnt/media`，该目录应已存在；不必修改 `compose.yaml`。容器内统一挂载为可读写的 `/media`，`MEDIA_ROOTS=/media` 无需随宿主机路径修改。可选配置有 `HTTP_PORT`、`NETWORK_MODE`、`PUID`、`PGID` 和 `POSTGRES_HOST_PORT`。go-emby 默认使用 `PUID=0`、`PGID=0`；不会递归修改外部媒体库的权限。
 
@@ -99,7 +102,7 @@ sudo chmod 700 postgres-data
 
 如果增加多个容器内媒体目录，请同步修改 `.env` 中的 `MEDIA_ROOTS`。
 
-PostgreSQL 目录权限以上述官方镜像实际 UID/GID 为准，不要使用 `chmod 777`。应用数据、备份和 `secrets` 目录使用当前用户可写的权限即可。
+PostgreSQL 目录权限以上述官方镜像实际 UID/GID 为准；已有数据库文件也必须可由该 UID/GID 读取。不要使用 `chmod 777`。应用数据、备份和 `secrets` 目录使用当前用户可写的权限即可。
 
 ### 4. 拉取镜像并启动
 
@@ -130,11 +133,12 @@ docker compose logs --tail=100 go-emby
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.host.yaml
+docker compose -f compose.yaml -f compose.host.yaml config
 docker compose -f compose.yaml -f compose.host.yaml pull
 docker compose -f compose.yaml -f compose.host.yaml up -d
 ```
 
-`NETWORK_MODE=host` 仅记录所选模式；Host 模式必须在每次 Compose 命令中带上 `-f compose.host.yaml`。PostgreSQL 仍在 Bridge 网络中，供应用使用的数据库端口仅绑定 `127.0.0.1`。
+`NETWORK_MODE=host` 仅记录所选模式；Host 模式必须在每次 Compose 命令中带上 `-f compose.host.yaml`。Host 覆盖文件使用 `!reset` 清除应用端口映射，需要 Docker Compose 2.24.4 或更新版本。PostgreSQL 仍在 Bridge 网络中，供应用使用的数据库端口仅绑定 `127.0.0.1`。
 
 默认目录结构如下。所有数据都在 `go-emby/` 内，方便整体备份和迁移：
 

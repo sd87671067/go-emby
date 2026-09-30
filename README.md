@@ -22,13 +22,13 @@ Go 编写的 Emby 兼容媒体服务器，提供 Web 管理界面和常用媒体
 
 ## 部署方式一：一键部署
 
-服务器需要提前安装 Docker Engine 和 Docker Compose v2。
+在 Debian/Ubuntu 服务器上以 root 运行；脚本会自动安装 Docker 和 Compose、生成随机数据库及管理员密码，并创建 `/opt/go-emby` 下的全部数据目录。普通用户需要已配置免密码 sudo。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sd87671067/go-emby/main/install.sh | bash
 ```
 
-安装脚本会引导完成部署配置。
+全程无需交互。默认使用 Bridge 网络，Web 端口为 8097。脚本会等待 PostgreSQL 与 go-emby 健康检查通过，并打印管理员密码。
 
 安装完成后访问：
 
@@ -36,7 +36,23 @@ curl -fsSL https://raw.githubusercontent.com/sd87671067/go-emby/main/install.sh 
 http://服务器IP:8097
 ```
 
-请妥善保存管理员密码、数据库密码和授权信息。
+数据库密码保存在权限为 `600` 的 `/opt/go-emby/.env` 中。媒体目录默认为 `/opt/go-emby/media`；接入已有媒体库时，可在安装后把 `.env` 中的 `MEDIA_PATH` 改为实际路径，再运行 `docker compose up -d`。
+
+默认目录结构：
+
+```text
+/opt/go-emby/
+├── compose.yaml
+├── compose.host.yaml
+├── .env
+├── app-data/
+├── app-backups/
+├── postgres-data/
+├── media/
+└── secrets/
+```
+
+旧版若使用 `go-emby_postgres-data` 数据卷，重新运行脚本会先停止服务并复制数据库到 `./postgres-data`，验证数据库可用后保留旧卷作为回滚备份。若迁移失败，脚本会恢复旧配置并停止安装。
 
 ## 部署方式二：Docker Compose
 
@@ -46,10 +62,11 @@ http://服务器IP:8097
 mkdir -p ~/go-emby && cd ~/go-emby
 ```
 
-### 2. 下载 compose.yaml 和 .env.example
+### 2. 下载部署文件
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.yaml
+curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.host.yaml
 curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/.env.example
 cp .env.example .env
 ```
@@ -65,15 +82,25 @@ ADMIN_PASSWORD=你的管理员密码
 
 管理员初始密码至少 12 个字符。
 
-根据服务器实际媒体目录修改 `compose.yaml` 中的媒体挂载，例如：
+在 `.env` 中可设置已有的宿主机媒体目录，例如 `MEDIA_PATH=/vol1/1000/Emby`。使用默认 `MEDIA_PATH=./media` 时，先执行 `mkdir -p media`。
+容器内媒体目录固定为 `/media`，`MEDIA_ROOTS=/media` 无需随宿主机路径修改。
 
-```yaml
-- /vol1/1000/strm:/media:rw
+`APP_DATA_PATH=./app-data`、`APP_BACKUP_PATH=./app-backups` 和 `POSTGRES_DATA_PATH=./postgres-data` 默认都位于当前 Compose 项目目录。手动部署首次启动前，先从官方镜像查询 PostgreSQL UID/GID 并设置数据库目录权限：
+
+```bash
+docker pull postgres:17-bookworm
+PG_UID=$(docker run --rm --entrypoint id postgres:17-bookworm -u postgres)
+PG_GID=$(docker run --rm --entrypoint id postgres:17-bookworm -g postgres)
+mkdir -p postgres-data
+sudo chown "$PG_UID:$PG_GID" postgres-data
+sudo chmod 700 postgres-data
 ```
 
-左侧是服务器真实媒体目录，右侧是容器内目录。
+若曾使用 `go-emby_postgres-data` named volume，请先运行一键脚本完成安全迁移，再按需切回手动维护；不要直接启动空的 `./postgres-data`。
 
 如果增加多个容器内媒体目录，请同步修改 `.env` 中的 `MEDIA_ROOTS`。
+
+如需 Host 网络，使用 `docker compose -f compose.yaml -f compose.host.yaml up -d`。Host 模式仅改变 go-emby 的网络、端口和数据库连接地址；PostgreSQL 始终使用同一个 `./postgres-data` 目录，宿主机端口仅绑定 `127.0.0.1`。Bridge 模式下 go-emby 连接 `postgres:5432`。
 
 ### 4. 拉取镜像并启动
 
@@ -99,7 +126,7 @@ docker compose ps
 docker compose logs --tail=100 go-emby
 ```
 
-> 不要执行 `docker compose down -v`，否则可能删除 PostgreSQL 数据卷。
+数据库、应用数据、备份和默认媒体目录均可在项目目录中统一备份或迁移。备份数据库文件前，请先停止 PostgreSQL。
 
 ## 更新
 
@@ -126,6 +153,9 @@ docker compose pull && docker compose up -d
 | `HTTP_PORT` | Web 访问端口 | `8097` |
 | `IMAGE_TAG` | Docker 镜像标签 | `latest` |
 | `PUID` / `PGID` | 容器运行 UID/GID | `0/0` |
+| `MEDIA_PATH` | 宿主机媒体目录，必须事先存在 | `./media` |
+| `APP_DATA_PATH` / `APP_BACKUP_PATH` | 宿主机应用数据与备份目录 | `./app-data` / `./app-backups` |
+| `POSTGRES_DATA_PATH` | PostgreSQL 数据目录 | `./postgres-data` |
 | `MEDIA_ROOTS` | 容器内允许访问的媒体根目录 | `/media` |
 | `LICENSE_KEY` | 授权码，免费模式可留空 | 空 |
 

@@ -1,419 +1,255 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
-REPO="sd87671067/go-emby"
-BRANCH="main"
-INSTALL_DIR="/opt/go-emby"
-COMPOSE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/compose.yaml"
-ENV_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/.env.example"
-DEFAULT_PORT="8097"
-APP_UID="65532"
-APP_GID="65532"
+REPO=sd87671067/go-emby
+BRANCH=main
+INSTALL_DIR=/opt/go-emby
+BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+POSTGRES_IMAGE=postgres:17-bookworm
 
-echo
-echo "============================================"
-echo "           go-emby 一键安装"
-echo "============================================"
-echo
-
-if [[ "${EUID}" -ne 0 ]]; then
-    echo "请使用 root 权限运行："
-    echo
-    echo "curl -fsSL https://raw.githubusercontent.com/${REPO}/${BRANCH}/install.sh | sudo bash"
-    echo
+if (( EUID != 0 )); then
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        curl -fsSL "${BASE_URL}/install.sh" | sudo -n bash
+        exit $?
+    fi
+    echo '需要 root 权限；请用 root 运行，或配置免密码 sudo 后重试。' >&2
     exit 1
 fi
 
-echo "[1/7] 检查基础工具..."
 export DEBIAN_FRONTEND=noninteractive
-
-NEED_PACKAGES="false"
-for cmd in curl openssl python3 setfacl getfacl; do
-    if ! command -v "${cmd}" >/dev/null 2>&1; then
-        NEED_PACKAGES="true"
+for command_name in curl openssl; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        apt-get update
+        apt-get install -y curl ca-certificates openssl
         break
     fi
 done
-
-if [[ "${NEED_PACKAGES}" == "true" ]]; then
-    apt-get update
-    apt-get install -y curl ca-certificates openssl python3 acl
-fi
-
-echo "✓ 基础工具正常"
-echo "✓ POSIX ACL 工具正常"
-
-echo
-echo "[2/7] 检查 Docker..."
-
 if ! command -v docker >/dev/null 2>&1; then
-    echo "未检测到 Docker，开始自动安装..."
     curl -fsSL https://get.docker.com | sh
 fi
-
 systemctl enable --now docker >/dev/null 2>&1 || true
-
 if ! docker compose version >/dev/null 2>&1; then
-    echo "未检测到 Docker Compose Plugin..."
     apt-get update
     apt-get install -y docker-compose-plugin
 fi
 
-echo "✓ Docker:"
-docker --version
-echo "✓ Docker Compose:"
-docker compose version
-
-echo
-echo "[3/7] 创建安装目录并修复数据目录权限..."
-
-mkdir -p \
-    "${INSTALL_DIR}" \
-    "${INSTALL_DIR}/secrets" \
-    "${INSTALL_DIR}/app-data" \
-    "${INSTALL_DIR}/app-backups"
-
-chown -R "${APP_UID}:${APP_GID}" \
-    "${INSTALL_DIR}/app-data" \
-    "${INSTALL_DIR}/app-backups"
-
-chmod 750 \
-    "${INSTALL_DIR}/app-data" \
-    "${INSTALL_DIR}/app-backups"
-
-chmod 700 "${INSTALL_DIR}/secrets"
-
-cd "${INSTALL_DIR}"
-
-echo "✓ ${INSTALL_DIR}"
-echo "✓ app-data -> ${APP_UID}:${APP_GID}"
-echo "✓ app-backups -> ${APP_UID}:${APP_GID}"
-
-echo
-echo "[4/7] 下载最新部署配置..."
-curl -fL --retry 3 --connect-timeout 10 "${COMPOSE_URL}" -o compose.yaml
-echo "✓ compose.yaml"
-
-echo
-echo "[5/7] 检查环境配置..."
-FIRST_INSTALL="false"
-
-if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
-    echo "首次安装，自动创建 .env..."
-    curl -fL --retry 3 --connect-timeout 10 "${ENV_URL}" -o .env
-
-    POSTGRES_PASSWORD="$(openssl rand -hex 24)"
-    ADMIN_PASSWORD="$(openssl rand -hex 24)"
-
-    if [[ "${POSTGRES_PASSWORD}" == "${ADMIN_PASSWORD}" ]]; then
-        ADMIN_PASSWORD="$(openssl rand -hex 24)"
+tmp_dir=$(mktemp -d)
+migration_pending=false
+old_compose=false
+old_host_compose=false
+old_env=false
+deployment_started=false
+db_dir_owner=
+db_dir_mode=
+rollback() {
+    local exit_code=$?
+    trap - EXIT
+    if [[ "$migration_pending" == true ]]; then
+        echo '迁移或启动失败，正在恢复原部署；旧 named volume 保持不变。' >&2
+        docker compose --env-file .env -f compose.yaml stop go-emby postgres >/dev/null 2>&1 || true
+        local postgres_container
+        postgres_container=$(docker compose --env-file .env -f compose.yaml ps -q postgres 2>/dev/null || true)
+        if [[ -n "$postgres_container" && $(docker inspect -f '{{.State.Running}}' "$postgres_container" 2>/dev/null || true) == true ]]; then
+            echo 'PostgreSQL 仍在运行，未清理复制目录；请先手动停止容器。' >&2
+            rm -rf "$tmp_dir"
+            exit "$exit_code"
+        fi
+        if [[ "$old_compose" == true ]]; then
+            cp -a "$tmp_dir/compose.yaml.old" compose.yaml
+        fi
+        if [[ "$old_host_compose" == true ]]; then
+            cp -a "$tmp_dir/compose.host.yaml.old" compose.host.yaml
+        fi
+        if [[ "$old_env" == true ]]; then
+            cp -a "$tmp_dir/.env.old" .env
+        fi
+        # 迁移前已确认该目录为空，故这里只清理本次复制的内容。
+        find "$INSTALL_DIR/postgres-data" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+        if [[ -n "$db_dir_owner" && -n "$db_dir_mode" ]]; then
+            chown "$db_dir_owner" "$INSTALL_DIR/postgres-data"
+            chmod "$db_dir_mode" "$INSTALL_DIR/postgres-data"
+        fi
+        if [[ "$old_compose" == true ]]; then
+            docker compose --env-file .env -f compose.yaml up -d >/dev/null 2>&1 || \
+                echo '旧配置已恢复，但旧服务未能自动启动；请检查 docker compose logs。' >&2
+        fi
+        echo '安装已停止。原数据库仍在 go-emby_postgres-data。' >&2
+    elif (( exit_code != 0 )) && [[ "$deployment_started" == false ]]; then
+        if [[ "$old_compose" == true ]]; then
+            cp -a "$tmp_dir/compose.yaml.old" compose.yaml
+        fi
+        if [[ "$old_host_compose" == true ]]; then
+            cp -a "$tmp_dir/compose.host.yaml.old" compose.host.yaml
+        fi
+        if [[ "$old_env" == true ]]; then
+            cp -a "$tmp_dir/.env.old" .env
+        fi
     fi
-
-    sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${POSTGRES_PASSWORD}|" .env
-    sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=${ADMIN_PASSWORD}|" .env
-
-    if grep -q '^HTTP_PORT=' .env; then
-        sed -i "s|^HTTP_PORT=.*|HTTP_PORT=${DEFAULT_PORT}|" .env
-    else
-        printf '\nHTTP_PORT=%s\n' "${DEFAULT_PORT}" >> .env
-    fi
-
-    if grep -q '^IMAGE_TAG=' .env; then
-        sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=latest|' .env
-    else
-        printf '\nIMAGE_TAG=latest\n' >> .env
-    fi
-
-    chmod 600 .env
-    FIRST_INSTALL="true"
-    echo "✓ 已生成随机数据库密码"
-    echo "✓ 已生成随机管理员密码"
-else
-    echo "检测到已有 .env"
-    echo "✓ 保留现有密码，不覆盖"
-    chmod 600 .env
-fi
-
-get_env() {
-    local KEY="$1"
-    sed -n "s/^${KEY}=//p" "${INSTALL_DIR}/.env" \
-        | tail -n 1 \
-        | sed -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//'
+    rm -rf "$tmp_dir"
+    exit "$exit_code"
 }
+trap rollback EXIT
 
-POSTGRES_PASSWORD="$(get_env POSTGRES_PASSWORD)"
-ADMIN_PASSWORD="$(get_env ADMIN_PASSWORD)"
-HTTP_PORT="$(get_env HTTP_PORT)"
-
-if [[ -z "${HTTP_PORT}" ]]; then
-    HTTP_PORT="${DEFAULT_PORT}"
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+if [[ -f compose.yaml ]]; then
+    cp -a compose.yaml "$tmp_dir/compose.yaml.old"
+    old_compose=true
 fi
-
-if [[ -z "${POSTGRES_PASSWORD}" ]]; then
-    echo
-    echo "错误：.env 中 POSTGRES_PASSWORD 为空。"
-    echo
-    exit 1
+if [[ -f compose.host.yaml ]]; then
+    cp -a compose.host.yaml "$tmp_dir/compose.host.yaml.old"
+    old_host_compose=true
 fi
-
-if [[ -z "${ADMIN_PASSWORD}" ]]; then
-    echo
-    echo "错误：.env 中 ADMIN_PASSWORD 为空。"
-    echo
-    exit 1
+if [[ -f .env ]]; then
+    cp -a .env "$tmp_dir/.env.old"
+    old_env=true
 fi
-
-echo
-echo "[6/7] 检查 Docker Compose 并配置媒体目录 ACL..."
-docker compose --env-file .env -f compose.yaml config --quiet
-echo "✓ Compose 配置正确"
-
-COMPOSE_JSON="$(mktemp)"
-MEDIA_HOST_ROOTS_FILE="$(mktemp)"
-cleanup_acl_tmp() {
-    rm -f "${COMPOSE_JSON}" "${MEDIA_HOST_ROOTS_FILE}"
-}
-trap cleanup_acl_tmp EXIT
-
-docker compose --env-file .env -f compose.yaml config --format json > "${COMPOSE_JSON}"
-
-python3 - "${COMPOSE_JSON}" > "${MEDIA_HOST_ROOTS_FILE}" <<'PY'
-import json
-import os
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as fh:
-    data = json.load(fh)
-
-service = data.get("services", {}).get("go-emby", {})
-env = service.get("environment") or {}
-
-container_roots = []
-for key in ("MEDIA_ROOTS", "FILE_MANAGER_ROOT"):
-    value = env.get(key, "")
-    values = value if isinstance(value, list) else str(value).split(":")
-    for item in values:
-        item = str(item).strip()
-        if item.startswith("/"):
-            container_roots.append(os.path.normpath(item))
-
-seen = set()
-
-for volume in service.get("volumes") or []:
-    if not isinstance(volume, dict) or volume.get("type") != "bind":
-        continue
-
-    source = volume.get("source")
-    target = volume.get("target")
-    if not source or not target:
-        continue
-
-    source = os.path.normpath(source)
-    target = os.path.normpath(target)
-
-    host_paths = []
-    for root in container_roots:
-        if root == target:
-            host_paths.append(source)
-        elif root.startswith(target.rstrip("/") + "/"):
-            rel = os.path.relpath(root, target)
-            host_paths.append(os.path.normpath(os.path.join(source, rel)))
-        elif target.startswith(root.rstrip("/") + "/"):
-            host_paths.append(source)
-
-    for host in host_paths:
-        if host not in seen:
-            seen.add(host)
-            print(host)
-PY
-
-mapfile -t MEDIA_HOST_ROOTS < <(sed '/^[[:space:]]*$/d' "${MEDIA_HOST_ROOTS_FILE}")
-
-if [[ "${#MEDIA_HOST_ROOTS[@]}" -eq 0 ]]; then
-    echo
-    echo "错误：未能根据 compose.yaml 的 bind mount 与 MEDIA_ROOTS/FILE_MANAGER_ROOT 找到宿主机媒体目录。"
-    echo "请检查 compose.yaml volumes 与 .env 中的 MEDIA_ROOTS。"
-    exit 1
-fi
-
-echo "检测到宿主机媒体目录："
-printf '  %s\n' "${MEDIA_HOST_ROOTS[@]}"
-
-for media_root in "${MEDIA_HOST_ROOTS[@]}"; do
-    [[ -e "${media_root}" ]] || mkdir -p "${media_root}"
-
-    # 父目录只补 traverse，不改变 owner/group，也不做 chmod 777。
-    parent="$(dirname "${media_root}")"
-    while [[ "${parent}" != "/" && -n "${parent}" ]]; do
-        setfacl -m "u:${APP_UID}:--x" "${parent}"
-        next_parent="$(dirname "${parent}")"
-        [[ "${next_parent}" == "${parent}" ]] && break
-        parent="${next_parent}"
-    done
-
-    # 现有目录：UID 65532 rwx，并设置 default ACL 让以后新建内容继承。
-    find -P "${media_root}" -type d -exec         setfacl -m "u:${APP_UID}:rwx,d:u:${APP_UID}:rwx" {} +
-
-    # 现有文件：UID 65532 可读写。不会给普通文件增加 execute。
-    find -P "${media_root}" -type f -exec         setfacl -m "u:${APP_UID}:rw-" {} +
+for filename in compose.yaml compose.host.yaml; do
+    curl -fsSL --retry 3 "${BASE_URL}/${filename}" -o "$tmp_dir/${filename}"
 done
+cp "$tmp_dir/compose.yaml" compose.yaml
+cp "$tmp_dir/compose.host.yaml" compose.host.yaml
 
-echo "✓ 媒体目录 ACL 已配置：UID ${APP_UID} rwX + default ACL"
-echo "✓ 未对媒体目录执行递归 chown/chmod/777"
-
-if [[ "${FIRST_INSTALL}" != "true" ]]; then
-    echo
-    echo "检查已有 PostgreSQL 数据..."
-
-    CURRENT_DB_DATA="false"
-    LEGACY_VOLUME=""
-
-    if [[ -f "${INSTALL_DIR}/postgres-data/PG_VERSION" ]] || \
-       [[ -d "${INSTALL_DIR}/postgres-data/base" ]]; then
-        CURRENT_DB_DATA="true"
-        echo "✓ 检测到当前目录 PostgreSQL 数据：${INSTALL_DIR}/postgres-data"
+if [[ ! -f .env ]]; then
+    curl -fsSL --retry 3 "${BASE_URL}/.env.example" -o .env
+    new_install=true
+else
+    new_install=false
+fi
+chmod 600 .env
+set_env() {
+    local key=$1 value=$2
+    if grep -q "^${key}=" .env; then
+        sed -i "s|^${key}=.*|${key}=${value}|" .env
+    else
+        printf '%s=%s\n' "$key" "$value" >> .env
     fi
-
-    LEGACY_VOLUME="$(
-        docker volume ls -q \
-            --filter 'label=com.docker.compose.project=go-emby' \
-            --filter 'label=com.docker.compose.volume=postgres-data' \
-            2>/dev/null | head -n 1 || true
-    )"
-
-    if [[ -z "${LEGACY_VOLUME}" ]] && docker volume inspect go-emby_postgres-data >/dev/null 2>&1; then
-        LEGACY_VOLUME="go-emby_postgres-data"
+}
+ensure_env() {
+    if ! grep -q "^${1}=" .env; then
+        set_env "$1" "$2"
     fi
+}
+get_env() {
+    sed -n "s/^${1}=//p" .env | tail -n 1 | sed -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//'
+}
+if [[ "$new_install" == true ]]; then
+    set_env POSTGRES_PASSWORD "$(openssl rand -hex 24)"
+    set_env ADMIN_PASSWORD "$(openssl rand -hex 24)"
+fi
+ensure_env APP_DATA_PATH ./app-data
+ensure_env APP_BACKUP_PATH ./app-backups
+set_env POSTGRES_DATA_PATH ./postgres-data
+ensure_env MEDIA_PATH ./media
+set_env NETWORK_MODE bridge
+ensure_env HTTP_PORT 8097
+chmod 600 .env
+POSTGRES_PASSWORD=$(get_env POSTGRES_PASSWORD)
+ADMIN_PASSWORD=$(get_env ADMIN_PASSWORD)
+HTTP_PORT=$(get_env HTTP_PORT)
+if [[ -z "$POSTGRES_PASSWORD" || ${#ADMIN_PASSWORD} -lt 12 ]]; then
+    echo 'POSTGRES_PASSWORD 不能为空，ADMIN_PASSWORD 至少 12 个字符。' >&2
+    exit 1
+fi
+mkdir -p app-data app-backups postgres-data media secrets
+chmod 700 secrets
 
-    if [[ -n "${LEGACY_VOLUME}" && "${CURRENT_DB_DATA}" != "true" ]]; then
-        echo
-        echo "错误：检测到旧 PostgreSQL Docker 数据卷，但当前 ./postgres-data 目录还没有数据库数据。"
-        echo "旧数据卷：${LEGACY_VOLUME}"
-        echo "新数据目录：${INSTALL_DIR}/postgres-data"
-        echo "为避免误创建新的空数据库，本次安装已停止。"
+docker compose --env-file .env -f compose.yaml config --quiet
+docker pull "$POSTGRES_IMAGE"
+postgres_uid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -u postgres)
+postgres_gid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -g postgres)
+if [[ ! "$postgres_uid" =~ ^[0-9]+$ || ! "$postgres_gid" =~ ^[0-9]+$ ]]; then
+    echo '无法从 postgres:17-bookworm 查询 postgres 用户的 UID/GID。' >&2
+    exit 1
+fi
+
+db_dir="$INSTALL_DIR/postgres-data"
+if [[ -f "$db_dir/PG_VERSION" ]]; then
+    echo '检测到现有 ./postgres-data，继续使用。'
+elif [[ -n "$(find "$db_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo 'postgres-data 非空，但缺少 PG_VERSION；为避免覆盖数据，安装停止。' >&2
+    exit 1
+elif docker volume inspect go-emby_postgres-data >/dev/null 2>&1; then
+    if ! docker run --rm --entrypoint sh -v go-emby_postgres-data:/source:ro \
+        "$POSTGRES_IMAGE" -c 'test -f /source/PG_VERSION && test -d /source/base && test -d /source/global'; then
+        echo '旧 named volume 存在，但数据库结构不完整；安装停止，避免初始化空数据库。' >&2
         exit 1
     fi
-
-    if [[ "${CURRENT_DB_DATA}" == "true" ]]; then
-        echo "启动 PostgreSQL 进行密码校验..."
-
-        docker compose --env-file .env -f compose.yaml up -d postgres >/dev/null
-
-        DB_READY="false"
-        for i in $(seq 1 30); do
-            STATUS="$(docker compose -f compose.yaml ps --format json postgres 2>/dev/null | grep -o '"Health":"[^"]*"' | head -n 1 || true)"
-            if [[ "${STATUS}" == *'healthy'* ]]; then
-                DB_READY="true"
-                break
-            fi
-            sleep 2
-        done
-
-        if [[ "${DB_READY}" != "true" ]]; then
-            echo "错误：PostgreSQL 未能正常启动，无法验证数据库密码。"
-            exit 1
-        fi
-
-        if ! docker compose --env-file .env -f compose.yaml exec -T \
-            -e "PGPASSWORD=${POSTGRES_PASSWORD}" \
-            postgres \
-            psql -h 127.0.0.1 -U emby -d emby -Atqc 'SELECT 1' \
-            >/dev/null 2>&1; then
-            echo "错误：数据库密码不匹配，为保护现有数据已停止。"
-            exit 1
-        fi
-
-        echo "✓ PostgreSQL 数据库密码与 .env 一致"
+    echo '检测到旧 named volume 数据，开始迁移。'
+    db_dir_owner=$(stat -c '%u:%g' "$db_dir")
+    db_dir_mode=$(stat -c '%a' "$db_dir")
+    migration_pending=true
+    if [[ "$old_compose" == true ]]; then
+        docker compose --project-directory "$INSTALL_DIR" --env-file .env \
+            -f "$tmp_dir/compose.yaml.old" stop go-emby postgres
     else
-        echo "✓ 未检测到已有 PostgreSQL 数据，将按当前 .env 初始化新数据库"
+        echo '存在旧数据库卷，但找不到原 compose.yaml；无法确认数据库已停止。' >&2
+        exit 1
     fi
+    # 再次确认目标为空；迁移期间任何失败都会回滚。
+    if [[ -n "$(find "$db_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+        echo '目标目录已非空，迁移停止。' >&2
+        exit 1
+    fi
+    docker run --rm --entrypoint sh \
+        -v go-emby_postgres-data:/source:ro \
+        -v "$db_dir:/target" "$POSTGRES_IMAGE" \
+        -c 'cp -a /source/. /target/'
+    if [[ ! -f "$db_dir/PG_VERSION" ]]; then
+        echo '复制完成后未找到 PG_VERSION。' >&2
+        exit 1
+    fi
+    echo '旧数据库已复制到 ./postgres-data；旧卷保留作为回滚备份。'
 fi
-
-echo
-echo "[7/7] 拉取 GitHub Container Registry 最新镜像并启动..."
-echo
+# 只调整 PostgreSQL 目录本身；数据库文件保持原来的 owner/permission。
+chown "${postgres_uid}:${postgres_gid}" "$db_dir"
+chmod 700 "$db_dir"
 
 docker compose --env-file .env -f compose.yaml pull
-docker compose --env-file .env -f compose.yaml up -d --remove-orphans
-
-echo
-echo "等待 go-emby 启动..."
-READY="false"
-
-for i in $(seq 1 60); do
-    if curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/health" >/dev/null 2>&1; then
-        READY="true"
+deployment_started=true
+docker compose --env-file .env -f compose.yaml up -d postgres
+postgres_id=$(docker compose --env-file .env -f compose.yaml ps -q postgres)
+if [[ -z "$postgres_id" ]]; then
+    echo 'PostgreSQL 容器未创建。' >&2
+    exit 1
+fi
+healthy=false
+for ((i=0; i<60; i++)); do
+    if [[ $(docker inspect -f '{{.State.Health.Status}}' "$postgres_id" 2>/dev/null || true) == healthy ]]; then
+        healthy=true
         break
     fi
-
-    APP_STATE="$(docker compose -f compose.yaml ps --format json go-emby 2>/dev/null || true)"
-    if echo "${APP_STATE}" | grep -Eq '"State":"(restarting|exited|dead)"'; then
-        echo
-        echo "错误：go-emby 容器启动失败或正在反复重启。"
-        docker compose -f compose.yaml logs --tail=50 go-emby || true
-        exit 1
-    fi
-
     sleep 2
 done
-
-PUBLIC_IP="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-
-if [[ -z "${PUBLIC_IP}" ]]; then
-    PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ "$healthy" != true ]]; then
+    echo 'PostgreSQL 健康检查失败。' >&2
+    exit 1
 fi
-
-if [[ -z "${PUBLIC_IP}" ]]; then
-    PUBLIC_IP="服务器IP"
+if [[ $(docker compose --env-file .env -f compose.yaml exec -T \
+    -e "PGPASSWORD=${POSTGRES_PASSWORD}" postgres \
+    psql -h 127.0.0.1 -U emby -d emby -Atqc 'SELECT 1') != 1 ]]; then
+    echo 'PostgreSQL SELECT 1 验证失败，请检查现有数据库密码。' >&2
+    exit 1
 fi
-
-echo
-echo
-echo "============================================"
-echo "          go-emby 安装完成"
-echo "============================================"
-echo
-
-if [[ "${READY}" == "true" ]]; then
-    echo "服务状态："
-    echo "  ✓ 正常运行"
-else
-    echo "服务状态："
-    echo "  ⚠ 容器已启动，但健康检查暂未通过"
+docker compose --env-file .env -f compose.yaml up -d --remove-orphans go-emby
+ready=false
+for ((i=0; i<60; i++)); do
+    if curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/health" >/dev/null 2>&1; then
+        ready=true
+        break
+    fi
+    sleep 2
+done
+if [[ "$ready" != true ]]; then
+    echo 'go-emby 健康检查失败。' >&2
+    docker compose --env-file .env -f compose.yaml logs --tail=50 go-emby >&2 || true
+    exit 1
 fi
-
-echo
-echo "访问地址："
-echo "  http://${PUBLIC_IP}:${HTTP_PORT}"
-echo
-echo "管理员账号："
-echo "  admin"
-echo
-echo "管理员密码："
-echo "  ${ADMIN_PASSWORD}"
-echo
-echo "安装目录："
-echo "  ${INSTALL_DIR}"
-echo
-echo "配置文件："
-echo "  ${INSTALL_DIR}/.env"
-echo
-
-if [[ "${FIRST_INSTALL}" == "true" ]]; then
-    echo "提示："
-    echo "  请保存上面的管理员密码。"
-    echo "  数据库密码已安全保存在 ${INSTALL_DIR}/.env"
-else
-    echo "提示："
-    echo "  检测到已有安装，原管理员密码和数据库密码均未修改。"
+migration_pending=false
+public_ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+if [[ -z "$public_ip" ]]; then
+    public_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 fi
-
-echo
-echo "常用命令："
-echo "  cd ${INSTALL_DIR}"
-echo "  docker compose ps"
-echo "  docker compose logs -f go-emby"
-echo "  docker compose pull"
-echo "  docker compose up -d"
-echo
-echo "============================================"
+printf '\n安装完成\n访问地址：http://%s:%s\n管理员账号：admin\n管理员密码：%s\n安装目录：%s\n' \
+    "${public_ip:-服务器IP}" "$HTTP_PORT" "$ADMIN_PASSWORD" "$INSTALL_DIR"

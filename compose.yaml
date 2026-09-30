@@ -16,7 +16,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
 
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - type: bind
+        source: ${POSTGRES_DATA_PATH:-./postgres-data}
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: true
 
     # 仅供 host 网络的 go-emby 从宿主机访问；bridge 模式仍走 postgres:5432。
     ports:
@@ -193,6 +197,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  postgres-data:

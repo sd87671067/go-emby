@@ -16,7 +16,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
 
     volumes:
-      - ./postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
+
+    # 仅供 host 网络的 go-emby 从宿主机访问；bridge 模式仍走 postgres:5432。
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
 
     healthcheck:
       test:
@@ -82,36 +86,34 @@ services:
       # go-emby 自身数据
       # ======================================================
 
-      - ./app-data:/app/data
+      - type: bind
+        source: ${APP_DATA_PATH:-./app-data}
+        target: /app/data
+        bind:
+          create_host_path: true
 
-      - ./app-backups:/app/backups
+      - type: bind
+        source: ${APP_BACKUP_PATH:-./app-backups}
+        target: /app/backups
+        bind:
+          create_host_path: true
 
 
       # ======================================================
       # 媒体目录
       #
-      # 格式：
-      #
-      #   - 本地目录:/容器目录:rw
-      #
-      # 左边：
-      #   Ubuntu / NAS 本地真实目录
-      #
-      # 右边：
-      #   go-emby 容器内部路径
-      #
-      # rw：
-      #   读写挂载。默认 PUID=0 / PGID=0，可避免常见 root:root 755
-      #   媒体目录导致的 NFO、海报写入失败。
-      #   如需降权，请把 .env 的 PUID/PGID 改为媒体目录实际 UID/GID。
-      #
-      # 可以继续复制下面的格式添加更多目录。
+      # MEDIA_PATH 是宿主机目录，必须事先存在；容器内固定为 /media。
+      # 默认读写，支持 NFO、海报等文件写入。
+      # 其他媒体目录可按下方示例自行增加。
       # ======================================================
 
 
-      # 主媒体目录；首次部署默认创建项目目录下的 media。
-      # 使用已有媒体库时，在 .env 中设置 MEDIA_PATH 为其绝对路径。
-      - ${MEDIA_PATH:-./media}:/media:rw
+      - type: bind
+        source: ${MEDIA_PATH:-./media}
+        target: /media
+        read_only: false
+        bind:
+          create_host_path: false
 
 
       # 电影
@@ -191,3 +193,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  postgres-data:

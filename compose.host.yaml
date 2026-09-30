@@ -1,10 +1,5 @@
 # Host 网络仅用于 go-emby；PostgreSQL 仍使用 compose.yaml 中的容器和数据目录。
 services:
-  postgres:
-    # 仅供 host 网络的 go-emby 从宿主机访问。
-    ports:
-      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
-
   go-emby:
     network_mode: host
     ports: !reset []

@@ -109,8 +109,9 @@ services:
       # ======================================================
 
 
-      # 主媒体目录
-      - /vol1/1000/strm:/media:rw
+      # 主媒体目录；首次部署默认创建项目目录下的 media。
+      # 使用已有媒体库时，在 .env 中设置 MEDIA_PATH 为其绝对路径。
+      - ${MEDIA_PATH:-./media}:/media:rw
 
 
       # 电影
@@ -165,12 +166,8 @@ services:
       # ======================================================
       # 私有 CA / secrets
       #
-      # 部署时创建：
-      #
-      #   mkdir -p secrets
-      #
-      # 如不使用 LICENSE_CA_FILE，
-      # secrets 目录可以保持为空。
+      # 首次启动时自动创建空目录；如使用 LICENSE_CA_FILE，
+      # 请将证书放在此目录中。
       # ======================================================
 
       - type: bind
@@ -178,7 +175,7 @@ services:
         target: /run/secrets
         read_only: true
         bind:
-          create_host_path: false
+          create_host_path: true
 
 
     stop_grace_period: 45s

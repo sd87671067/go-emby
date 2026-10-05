@@ -279,8 +279,10 @@ if [[ $(docker compose --env-file .env "${compose_files[@]}" exec -T \
     echo 'PostgreSQL SELECT 1 验证失败，请检查现有数据库密码。' >&2
     exit 1
 fi
+failure_stage='go-emby schema prepare'
+run_quiet docker compose --env-file .env "${compose_files[@]}" run --rm --no-deps schema-prepare
 failure_stage='go-emby container create'
-run_quiet docker compose --env-file .env "${compose_files[@]}" up -d --force-recreate --remove-orphans go-emby
+run_quiet docker compose --env-file .env "${compose_files[@]}" up -d --no-deps --force-recreate --remove-orphans go-emby
 app_id=$(docker compose --env-file .env "${compose_files[@]}" ps -a -q go-emby </dev/null)
 if [[ -z "$app_id" ]]; then
     echo 'go-emby 容器未创建。' >&2

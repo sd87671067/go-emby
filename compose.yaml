@@ -55,8 +55,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      schema-prepare:
-        condition: service_completed_successfully
 
     environment:
       DATABASE_URL: &database-url >-
@@ -87,6 +85,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema-prepare:
+        condition: service_completed_successfully
 
     ports:
       - "${HTTP_PORT:-8097}:8097"

@@ -42,6 +42,37 @@ services:
 
 
   # ==========================================================
+  # Schema preparation
+  # ==========================================================
+
+  # 每次升级在主服务启动前自动检查/补齐当前版本所需 schema。
+  # 该服务执行完成即退出，不常驻、不占用运行期 CPU/内存。
+  schema-prepare:
+    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
+    command: ["--prepare-schema"]
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema-prepare:
+        condition: service_completed_successfully
+
+    environment:
+      DATABASE_URL: &database-url >-
+        postgres://emby:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/emby?sslmode=disable
+
+    healthcheck:
+      disable: true
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+
+  # ==========================================================
   # go-emby
   # ==========================================================
 
@@ -62,8 +93,7 @@ services:
 
     environment:
 
-      DATABASE_URL: >-
-        postgres://emby:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/emby?sslmode=disable
+      DATABASE_URL: *database-url
 
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 设置 ADMIN_PASSWORD}
 

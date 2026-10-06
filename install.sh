@@ -307,7 +307,7 @@ if [[ $(docker compose --env-file .env "${compose_files[@]}" exec -T \
 fi
 progress '准备/升级数据库结构'
 failure_stage='go-emby schema prepare'
-docker compose --env-file .env "${compose_files[@]}" run --rm --no-deps schema-prepare
+docker compose --env-file .env "${compose_files[@]}" run --rm --no-deps -T schema-prepare </dev/null
 progress_note '数据库结构准备完成'
 
 progress '启动 go-emby'

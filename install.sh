@@ -8,6 +8,16 @@ INSTALL_DIR=/opt/go-emby
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 POSTGRES_IMAGE=postgres:17-bookworm
 
+progress_step=0
+progress_total=11
+progress() {
+    progress_step=$((progress_step + 1))
+    printf '\n[%02d/%02d] %s\n' "$progress_step" "$progress_total" "$1"
+}
+progress_note() {
+    printf '  -> %s\n' "$1"
+}
+
 if (( EUID != 0 )); then
     if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
         curl -fsSL "${BASE_URL}/install.sh" | sudo -n bash
@@ -104,6 +114,7 @@ run_quiet() {
     return 1
 }
 
+progress '准备安装目录和部署文件'
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 if [[ -f compose.yaml ]]; then
@@ -118,14 +129,16 @@ if [[ -f .env ]]; then
     cp -a .env "$tmp_dir/.env.old"
     old_env=true
 fi
+progress_note '下载最新 compose.yaml / compose.host.yaml'
 for filename in compose.yaml compose.host.yaml; do
-    curl -fsSL --retry 3 "${BASE_URL}/${filename}" -o "$tmp_dir/${filename}"
+    curl -fL --retry 3 --connect-timeout 10 --progress-bar "${BASE_URL}/${filename}" -o "$tmp_dir/${filename}"
 done
 cp "$tmp_dir/compose.yaml" compose.yaml
 cp "$tmp_dir/compose.host.yaml" compose.host.yaml
 
 if [[ ! -f .env ]]; then
-    curl -fsSL --retry 3 "${BASE_URL}/.env.example" -o .env
+    progress_note '首次安装：下载 .env.example 并生成随机密码'
+    curl -fL --retry 3 --connect-timeout 10 --progress-bar "${BASE_URL}/.env.example" -o .env
     new_install=true
 else
     new_install=false
@@ -154,6 +167,7 @@ HTTP_PORT=$(get_env HTTP_PORT)
 HTTP_PORT=${HTTP_PORT:-8097}
 NETWORK_MODE=$(get_env NETWORK_MODE)
 POSTGRES_DATA_PATH=$(get_env POSTGRES_DATA_PATH)
+progress '检查环境变量和媒体目录'
 admin_password_bytes=$(printf '%s' "$ADMIN_PASSWORD" | wc -c)
 if [[ -z "$POSTGRES_PASSWORD" || $admin_password_bytes -lt 12 ]]; then
     echo 'POSTGRES_PASSWORD 不能为空，ADMIN_PASSWORD 至少 12 字节。' >&2
@@ -182,10 +196,15 @@ if [[ -n "$MEDIA_PATH" && ! -d "$MEDIA_PATH" ]]; then
     exit 1
 fi
 
+progress '校验 Docker Compose 配置'
 failure_stage='Compose 配置解析'
 docker compose --env-file .env "${compose_files[@]}" config --quiet
+progress_note 'Compose 配置有效'
+
+progress '拉取 PostgreSQL 镜像'
 failure_stage='PostgreSQL 镜像拉取'
-run_quiet docker pull "$POSTGRES_IMAGE"
+docker pull "$POSTGRES_IMAGE"
+progress '检查 PostgreSQL 数据目录和权限'
 failure_stage='PostgreSQL UID/GID 查询'
 postgres_uid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -u postgres </dev/null)
 postgres_gid=$(docker run --rm --entrypoint id "$POSTGRES_IMAGE" -g postgres </dev/null)
@@ -248,11 +267,14 @@ if [[ -f "$db_dir/PG_VERSION" ]]; then
     fi
 fi
 
+progress '拉取 go-emby 最新镜像'
 failure_stage='go-emby image pull'
-run_quiet docker compose --env-file .env "${compose_files[@]}" pull go-emby
+docker compose --env-file .env "${compose_files[@]}" pull go-emby
+
+progress '启动 PostgreSQL'
 deployment_started=true
 failure_stage='PostgreSQL container create'
-run_quiet docker compose --env-file .env "${compose_files[@]}" up -d postgres
+docker compose --env-file .env "${compose_files[@]}" up -d postgres
 failure_stage='PostgreSQL health check'
 postgres_id=$(docker compose --env-file .env "${compose_files[@]}" ps -a -q postgres </dev/null)
 if [[ -z "$postgres_id" ]]; then
@@ -265,6 +287,9 @@ for ((i=0; i<60; i++)); do
         healthy=true
         break
     fi
+    if (( i % 5 == 0 )); then
+        progress_note "等待 PostgreSQL healthy... $((i * 2))s"
+    fi
     sleep 2
 done
 if [[ "$healthy" != true ]]; then
@@ -272,6 +297,7 @@ if [[ "$healthy" != true ]]; then
     docker compose --env-file .env "${compose_files[@]}" logs --tail=50 postgres </dev/null >&2 || true
     exit 1
 fi
+progress_note 'PostgreSQL healthy'
 failure_stage='PostgreSQL SELECT 1'
 if [[ $(docker compose --env-file .env "${compose_files[@]}" exec -T \
     -e "PGPASSWORD=${POSTGRES_PASSWORD}" postgres \
@@ -279,10 +305,14 @@ if [[ $(docker compose --env-file .env "${compose_files[@]}" exec -T \
     echo 'PostgreSQL SELECT 1 验证失败，请检查现有数据库密码。' >&2
     exit 1
 fi
+progress '准备/升级数据库结构'
 failure_stage='go-emby schema prepare'
-run_quiet docker compose --env-file .env "${compose_files[@]}" run --rm --no-deps schema-prepare
+docker compose --env-file .env "${compose_files[@]}" run --rm --no-deps schema-prepare
+progress_note '数据库结构准备完成'
+
+progress '启动 go-emby'
 failure_stage='go-emby container create'
-run_quiet docker compose --env-file .env "${compose_files[@]}" up -d --no-deps --force-recreate --remove-orphans go-emby
+docker compose --env-file .env "${compose_files[@]}" up -d --no-deps --force-recreate --remove-orphans go-emby
 app_id=$(docker compose --env-file .env "${compose_files[@]}" ps -a -q go-emby </dev/null)
 if [[ -z "$app_id" ]]; then
     echo 'go-emby 容器未创建。' >&2
@@ -304,6 +334,7 @@ container_owns_listen_port() {
     return 1
 }
 failure_stage='go-emby health check'
+progress '等待 go-emby 健康检查'
 ready=false
 for ((i=0; i<60; i++)); do
     state_before=$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$app_id" 2>/dev/null || true)
@@ -318,6 +349,9 @@ for ((i=0; i<60; i++)); do
             break
         fi
     fi
+    if (( i % 5 == 0 )); then
+        progress_note "等待 go-emby healthy... $((i * 2))s"
+    fi
     sleep 2
 done
 if [[ "$ready" != true ]]; then
@@ -329,6 +363,8 @@ if [[ "$ready" != true ]]; then
     fi
     exit 1
 fi
+progress_note 'go-emby 已健康运行'
+progress '完成部署'
 migration_pending=false
 public_ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
 if [[ -z "$public_ip" ]]; then

@@ -1,74 +1,32 @@
-# .env 中文填写说明
+# Compose 配置
 
-首次部署时，把仓库的 `.env.example` 复制成同目录的 `.env`。授权地址、小雅地址和 NanShare 地址已经填好，普通客户只需填写密码设置和授权码；免费模式下授权码可以不填。模板中的注释均为中文。
-
-## 1. 获取配置
+新安装仅需 `compose.yaml`，无需 `.env`。默认端口 8097、Bridge、Asia/Shanghai、root、GHCR latest；数据库和管理员密码分别随机生成并持久化。读取初始管理员密码：
 
 ```bash
-git clone https://github.com/sd87671067/go-emby.git
-cd go-emby
-[ -e .env ] || (umask 077; cp .env.example .env)
-chmod 600 .env
-mkdir -p media secrets
-nano .env
+docker compose exec go-emby cat /app/data/initial-admin-password
 ```
 
-Docker 的 `pull` 命令只下载镜像，不会生成宿主机 `.env`。上面的复制步骤会生成已预填地址的配置；已有配置不会被覆盖。更新仓库后，已有用户可以按需手动修改三个地址，不要覆盖自己的密码。
+`.env` 为可选配置；已有 `.env` 继续生效，不能覆盖、清空或重新生成旧密码。bind mount 升级必须保留原 `APP_DATA_PATH`、`APP_BACKUP_PATH`、`POSTGRES_DATA_PATH` 和 `MEDIA_PATH`。若原 `.env` 未写路径，升级前补入原实际路径，否则新版默认 named volume 会指向其他存储。不要自动复制、搬迁或初始化替代数据库。详细核对步骤见 [README](README.md#已有用户升级)。
 
-## 2. 客户需要填写的项目
-
-| 变量 | 填写说明 |
+| 变量 | 默认值或用途 |
 | --- | --- |
-| `POSTGRES_PASSWORD` | 必填，数据库密码。建议执行 `openssl rand -hex 24` 生成，只使用十六进制字符，避免数据库连接地址的特殊字符转义问题。 |
-| `ADMIN_PASSWORD` | 必填，初始管理员 `admin` 的密码，至少 12 个字符；建议单独生成，与数据库密码不同。 |
-| `LICENSE_KEY` | 付费模式填写有效授权码；授权服务开启免费模式时留空即可。 |
+| `IMAGE_TAG` | `latest` |
+| `HTTP_PORT` | `8097` |
+| `TZ` | `Asia/Shanghai` |
+| `PUID` / `PGID` | `0` / `0`；降权需自行配置媒体访问权限 |
+| `POSTGRES_PASSWORD` | 新装留空随机生成；升级必须使用原数据库密码 |
+| `ADMIN_PASSWORD` | 新装留空随机生成；仅空用户库首次创建管理员时生效 |
+| `DATABASE_URL` | 默认连接 postgres:5432/emby，启动时对密码逐字节 URL 编码，兼容特殊字符与备份；可保留原自定义连接 |
+| `APP_DATA_PATH` / `APP_BACKUP_PATH` | 默认 `app-data` / `app-backups` 卷；接受原 bind 路径 |
+| `POSTGRES_DATA_PATH` | 默认 `postgres-data` 卷；接受原 bind 路径 |
+| `MEDIA_PATH` | 默认 `media` 卷；支持宿主机目录 rw 挂载 |
+| `MEDIA_ROOTS` | `/media`；多个容器内路径用冒号分隔，并保留对应挂载 |
+| `POSTGRES_HOST_PORT` | `5433`，仅绑定宿主机回环供旧 Host override 使用 |
+| `LICENSE_KEY` / `LICENSE_SERVER_URL` | 原授权配置继续使用；默认服务为 https://tl.macacaaca.top |
+| `GO_EMBY_INSTANCE_ID` | 原值保留；为空时使用持久化实例标识 |
+| `PUBLIC_URL` / `BOOTSTRAP_API_KEY` | 保留旧配置；默认空 |
+| `XIAOYA_USERNAME` / `XIAOYA_PASSWORD` | 旧凭据兼容；新 UI 密码优先，用户名固定 dav，留空保留 |
 
-例如，免费模式保留 `LICENSE_KEY=`；付费模式填写 `LICENSE_KEY='你的授权码'`。填写时不要把示例文字当作真实密码或授权码。包含 `$`、`#` 或空格的值请使用英文单引号包围。
+旧自定义证书或额外挂载需保留原 override，精简模板不再声明 `LICENSE_CA_FILE` 和 secrets 目录。不需要 NanShare/Xiaoya URL 变量来解析播放源；本模板不会创建或修改任何第三方服务。
 
-是否免费由授权服务决定，留空授权码本身不会切换模式，也不会跳过授权校验。免费模式仍需能连接授权服务。
-
-## 3. 已填好的地址
-
-```dotenv
-# 授权服务地址，通常不需要修改
-LICENSE_SERVER_URL=https://tl.macacaaca.top
-# 小雅服务地址
-XIAOYA_URL=http://172.18.0.1:5678
-# NanShare 服务地址
-NANSHARE_URL=http://172.18.0.1:8115
-```
-
-环境变量区分大小写，必须使用上面的大写名称，不要改为 `xiaoya_url` 或 `NanShare_url`。Compose 对这三个变量同时设置了默认值，未配置或留空时仍使用上面的地址。修改 `.env` 后执行 `docker compose up -d`，让 Compose 重建配置发生变化的容器。
-
-`172.18.0.1` 是内网地址，客户主机需要确保 go-emby 容器能访问该地址的 5678 和 8115 端口。如果客户 Docker 网络或上游服务地址不同，请改成容器实际可访问的小雅和 NanShare 地址。预填地址不会自动安装这两个服务。
-
-## 4. 启动与访问
-
-默认媒体目录为当前仓库下的 `./media`，将 STRM、NFO、海报等文件放入其中；已有其他媒体目录时，才需要修改 `MEDIA_PATH`。容器内统一使用 `/media`，媒体文件需要允许 UID/GID `65532:65532` 读取。
-
-```bash
-docker compose config --quiet
-docker compose pull && docker compose up -d
-docker compose ps
-```
-
-浏览器访问 `http://你的服务器地址:8097`，用户名 `admin`，密码为首次初始化时设置的 `ADMIN_PASSWORD`。配置准备好之后，拉取并启动只需上面的 `docker compose pull && docker compose up -d` 一行命令。
-
-## 5. 其他可选设置
-
-| 变量 | 默认值与说明 |
-| --- | --- |
-| `IMAGE_TAG` | `latest`，需要固定版本时再修改。 |
-| `HTTP_PORT` | `8097`，宿主机端口冲突时修改。 |
-| `MEDIA_PATH` | `./media`，宿主机媒体目录，必须提前存在。 |
-| `LICENSE_CA_FILE` | 留空，使用系统信任的公共证书；私有 CA 场景将证书放入 `secrets/license-ca.crt`，填写 `/run/secrets/license-ca.crt`。 |
-| `PUBLIC_URL` | 留空，按需填写客户端可访问的本服务完整地址。 |
-| `PUBLIC_PLAYBACK_URL` | 留空，按需配置对外播放入口。 |
-| `BOOTSTRAP_API_KEY` | 留空，按需配置首次初始化的接口密钥。 |
-| `PROBE_PLAYBACK_URL` | 留空，按需配置后台媒体探测入口。 |
-
-## 6. 已有部署注意事项
-
-`ADMIN_PASSWORD` 只用于空数据库首次初始化，后续修改管理员密码请使用管理界面。已有 PostgreSQL 数据库不能只修改 `.env` 的 `POSTGRES_PASSWORD`，还需同步修改数据库角色密码。升级时保留 `.env`、媒体、证书和数据卷，不要执行会删除数据卷的 `docker compose down -v`。
-
-不要公开自己的 `.env`。仓库只提供不含客户密码和授权码的模板。本次配置与文档调整不修改程序、播放逻辑、接口或授权机制。
+无 `.env` 安装的数据库密码在独立 bootstrap 卷中，管理员密码在 app-data 中；两个密码不同、文件权限 600。备份时保留应用、数据库、bootstrap 和备份卷，媒体卷或外部媒体目录也需按原策略备份。显式配置密码时通过 `.env` 保护并执行 `chmod 600 .env`，含 `$`、`#` 或空格使用单引号。

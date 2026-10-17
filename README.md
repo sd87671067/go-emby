@@ -20,161 +20,58 @@ Go Emby是用go语言编写的 Emby 兼容媒体服务器，提供 Web 管理界
 - 多架构镜像：amd64 / arm64
 - 播放使用重定向/直连媒体源，不进行视频转码
 
-## 部署方式一：一键部署
+## Docker Compose 部署
 
-在 Debian/Ubuntu 服务器上以 root 运行；脚本会自动安装 Docker 和 Compose、生成随机数据库及管理员密码，并创建 `/opt/go-emby` 下的全部数据目录。普通用户需要已配置免密码 sudo。
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/sd87671067/go-emby/main/install.sh | bash
-```
-
-全程无需交互。脚本自动完成密码生成、目录创建、权限设置、数据库初始化、服务启动和健康检查，并显示管理员密码。默认使用 Bridge 网络，Web 端口为 8097。
-
-安装完成后访问：
-
-```text
-http://服务器IP:8097
-```
-
-使用账号 `admin` 和安装脚本显示的密码登录即可。数据库密码不会显示在终端，保存在权限为 `600` 的 `/opt/go-emby/.env` 中。脚本已创建可读写的 `/opt/go-emby/media` 并挂载到容器的 `/media`；以后可在 Web 中添加 `/media` 作为媒体库。
-
-默认目录结构：
-
-```text
-/opt/go-emby/
-├── compose.yaml
-├── compose.host.yaml
-├── .env
-├── app-data/
-├── app-backups/
-├── postgres-data/
-├── media/
-└── secrets/
-```
-
-重复运行安装命令会保留 `.env`、密码及所有数据目录，仅更新 Compose 模板和镜像。现有数据库会使用 `.env` 中的密码执行 `SELECT 1` 验证；验证失败立即停止，不会重建数据库。旧版若使用 `go-emby_postgres-data` 数据卷，脚本会先停止服务并迁移到 `./postgres-data`，旧卷仍保留。
-
-如果应用容器创建或启动失败，脚本会显示 Docker 错误及已有应用容器的状态和日志，并保留 `.env`、`postgres-data` 等数据。修复端口占用或挂载目录等问题后，直接重新运行同一安装命令即可。
-
-## 部署方式二：Docker Compose
-
-### 1. 创建部署目录
+新安装只需一个 `compose.yaml`，不强制 `.env`：
 
 ```bash
 mkdir -p ~/go-emby && cd ~/go-emby
+curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.yaml
+docker compose up -d
 ```
 
-### 2. 下载部署文件
+默认 GHCR `latest`、Bridge 网络、8097 端口、Asia/Shanghai、应用 root（0:0）。启动顺序为 PostgreSQL Healthy → `schema-prepare --prepare-schema` 成功 → go-emby。Schema 失败时应用不会启动，没有 `data-init` 或自动数据搬迁。
+
+访问 `http://服务器IP:8097`，用户名 `admin`。首次安装随机生成独立的数据库和管理员密码，没有公开固定密码；管理员密码通过以下命令读取，请妥善保管：
 
 ```bash
-curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.yaml
-curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/.env.example
-cp .env.example .env
-chmod 600 .env
-mkdir -p app-data app-backups postgres-data media secrets
+docker compose exec go-emby cat /app/data/initial-admin-password
 ```
 
-### 3. 修改配置
+已有 `ADMIN_PASSWORD` 仍优先使用，且仅在空用户库首次初始化时生效，不会重置旧账号密码。数据库密码保存在独立的 `bootstrap` 卷中，仅以只读方式提供给应用和 Schema 服务；应用数据与 PostgreSQL 使用独立持久化卷。不要删除这些卷。媒体默认使用可读写的 `media` 卷；挂载宿主机媒体可设置 `.env` 中的 `MEDIA_PATH=/你的媒体目录`。额外媒体路径需要保留原挂载并同步配置 `MEDIA_ROOTS`。
 
-编辑 `.env`，只需填写以下三项（`MEDIA_PATH=./media` 已是默认值）：
+## 已有用户升级
 
-```env
-POSTGRES_PASSWORD=你的数据库密码
-ADMIN_PASSWORD=你的管理员密码
+保留原项目名称、部署目录、`.env`、Compose overrides、原密码、卷及所有数据。先用 `docker inspect` 核对当前容器的 Mounts，再用 `docker compose config` 对比新配置。**原来使用 bind mount 的用户必须保留原路径变量**，例如：
+
+```dotenv
+APP_DATA_PATH=./app-data
+APP_BACKUP_PATH=./app-backups
+POSTGRES_DATA_PATH=./postgres-data
 MEDIA_PATH=./media
 ```
 
-管理员初始密码须为 12 到 72 字节。一键脚本生成 48 个 ASCII 字符的随机密码。
+相对路径仍相对于原 Compose 目录；也可填写原目录的绝对路径。旧 `.env` 已有这些变量时直接继续使用。原来使用 named volume 的用户应保持相同项目名和卷名（默认 `go-emby_app-data`、`go-emby_postgres-data` 等）；自定义卷可在 override 中指明原 external volume。没有设置路径的新版默认使用 named volume，不能替换为一个空卷后启动旧安装。
 
-`MEDIA_PATH` 是宿主机路径，也可设为 `/vol1/1000/Emby` 或 `/mnt/media`，该目录应已存在；不必修改 `compose.yaml`。容器内统一挂载为可读写的 `/media`，`MEDIA_ROOTS=/media` 无需随宿主机路径修改。可选配置有 `HTTP_PORT`、`NETWORK_MODE`、`PUID`、`PGID` 和 `POSTGRES_HOST_PORT`。go-emby 默认使用 `PUID=0`、`PGID=0`；不会递归修改外部媒体库的权限。
+保留原 `POSTGRES_PASSWORD`（包括特殊字符，启动时逐字节 URL 编码）及 `DATABASE_URL`、`LICENSE_KEY`、`LICENSE_SERVER_URL`、`GO_EMBY_INSTANCE_ID`。旧数据库若没有原密码也没有 bootstrap 密码文件会明确停止，不生成替代密码、不重置数据库。默认保留机器标识挂载以维持授权绑定；自定义授权证书不再内置，需要该配置的旧部署应保留自己的环境变量及只读证书挂载 override。
 
-`APP_DATA_PATH=./app-data`、`APP_BACKUP_PATH=./app-backups` 和 `POSTGRES_DATA_PATH=./postgres-data` 默认都位于当前 Compose 项目目录。手动部署首次启动前，先从官方镜像查询 PostgreSQL UID/GID 并设置数据库目录权限：
-
-```bash
-docker pull postgres:17-bookworm
-PG_UID=$(docker run --rm --entrypoint id postgres:17-bookworm -u postgres)
-PG_GID=$(docker run --rm --entrypoint id postgres:17-bookworm -g postgres)
-sudo chown "$PG_UID:$PG_GID" postgres-data
-sudo chmod 700 postgres-data
-```
-
-若曾使用 `go-emby_postgres-data` named volume，请先运行一键脚本完成安全迁移，再按需切回手动维护；不要直接启动空的 `./postgres-data`。
-
-如果增加多个容器内媒体目录，请同步修改 `.env` 中的 `MEDIA_ROOTS`。
-
-PostgreSQL 目录权限以上述官方镜像实际 UID/GID 为准；已有数据库文件也必须可由该 UID/GID 读取。不要使用 `chmod 777`。应用数据、备份和 `secrets` 目录使用当前用户可写的权限即可。
-
-### 4. 拉取镜像并启动
+核对挂载后执行：
 
 ```bash
 docker compose pull
 docker compose up -d
+docker compose ps -a
 ```
 
-启动完成后访问：
+这只更新服务，不搬迁原数据库和文件；Schema 准备保留现有数据并幂等执行。旧 Host 网络继续使用原 `compose.host.yaml`，每次命令带上 `-f compose.yaml -f compose.host.yaml`。不要用旧安装脚本进行此次升级；该脚本存在历史数据搬迁逻辑，本次模板不调用它。
 
-```text
-http://服务器IP:8097
-```
+## 媒体写入与 Xiaoya
 
-查看状态：
+应用默认 root，并在 `cap_drop: ALL` 下仅补回 `DAC_OVERRIDE` 和 `FOWNER`，覆盖旧目录属主与权限造成的本地写入问题；不递归 chmod/chown，不修改其他容器。主动设置 `PUID/PGID` 的旧用户仍可降权，但需让该用户获得目标目录访问权限。NFO、海报、背景、字幕及 STRM 采用受限目录内原子发布；保留既有用户文件及来源所有权检查。
 
-```bash
-docker compose ps
-```
+root 无法绕过容器/宿主机 `ro`、NFS `root_squash`、CIFS/FUSE 服务端权限、NAS ACL 或用户命名空间限制。失败提示保留 errno 并说明检查方向，不对这些限制自动 chmod。可用 `findmnt -T 媒体路径`、`namei -l 媒体路径`、`getfacl 媒体路径` 检查；同时检查容器 Mounts 的 RW、Capabilities 和宿主机映射。
 
-查看日志：
-
-```bash
-docker compose logs --tail=100 go-emby
-```
-
-默认 Bridge 网络（推荐）。如需 Host 网络，先下载覆盖文件，将 `.env` 中的 `NETWORK_MODE` 设为 `host`，然后执行：
-
-```bash
-curl -fLO https://raw.githubusercontent.com/sd87671067/go-emby/main/compose.host.yaml
-docker compose -f compose.yaml -f compose.host.yaml config
-docker compose -f compose.yaml -f compose.host.yaml pull
-docker compose -f compose.yaml -f compose.host.yaml up -d
-```
-
-`NETWORK_MODE=host` 仅记录所选模式；Host 模式必须在每次 Compose 命令中带上 `-f compose.host.yaml`。Host 覆盖文件使用 `!reset` 清除应用端口映射，需要 Docker Compose 2.24.4 或更新版本。PostgreSQL 仍在 Bridge 网络中，供应用使用的数据库端口仅绑定 `127.0.0.1`。
-
-默认目录结构如下。所有数据都在 `go-emby/` 内，方便整体备份和迁移：
-
-```text
-go-emby/
-├── compose.yaml
-├── compose.host.yaml  # 仅 Host 模式下载
-├── .env
-├── app-data/
-├── app-backups/
-├── postgres-data/
-├── media/
-└── secrets/
-```
-
-备份前建议先执行 `docker compose down`（Host 模式使用相同的两个 `-f` 参数），再备份整个 `go-emby/` 目录。恢复时还原整个目录，再执行 `docker compose up -d`（Host 模式仍使用两个 `-f` 参数）。不要使用 `docker compose down -v`。
-
-## 更新
-
-进入部署目录后，Bridge 模式执行：
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-Host 模式执行：
-
-```bash
-docker compose -f compose.yaml -f compose.host.yaml pull
-docker compose -f compose.yaml -f compose.host.yaml up -d
-```
-
-更新只拉取新镜像并重新创建容器，已有 `.env`、媒体目录、`app-data` 和 PostgreSQL 数据会继续保留。
-
-如果仓库中的 `compose.yaml` 或 `.env.example` 有更新，可以重新下载模板后手动合并配置。**不要直接用 `.env.example` 覆盖已经配置好的 `.env`。**
+新版应用的 Xiaoya 设置在“启用 STRM 同步”下提供密码框，新保存的密码固定使用 `dav`；密码加密持久化，不回显，留空保留。未保存新密码时继续兼容 `XIAOYA_USERNAME` / `XIAOYA_PASSWORD` 和源目录 `guestpass.txt`。同步的增量、缺失补回、来源隔离与暂停恢复行为保持不变。此文档和 Compose 更新不发布 GHCR；这些应用修复需使用包含相应私库提交的镜像。
 
 ## 配置说明
 
@@ -189,9 +86,9 @@ docker compose -f compose.yaml -f compose.host.yaml up -d
 | `HTTP_PORT` | Web 访问端口 | `8097` |
 | `IMAGE_TAG` | Docker 镜像标签 | `latest` |
 | `PUID` / `PGID` | 容器运行 UID/GID | `0/0` |
-| `MEDIA_PATH` | 宿主机媒体目录，必须事先存在 | `./media` |
-| `APP_DATA_PATH` / `APP_BACKUP_PATH` | 宿主机应用数据与备份目录 | `./app-data` / `./app-backups` |
-| `POSTGRES_DATA_PATH` | PostgreSQL 数据目录 | `./postgres-data` |
+| `MEDIA_PATH` | 宿主机媒体目录或卷 | `media` 卷 |
+| `APP_DATA_PATH` / `APP_BACKUP_PATH` | 应用数据与备份目录或卷 | `app-data` / `app-backups` 卷 |
+| `POSTGRES_DATA_PATH` | PostgreSQL 数据目录或卷 | `postgres-data` 卷 |
 | `MEDIA_ROOTS` | 容器内允许访问的媒体根目录 | `/media` |
 | `LICENSE_KEY` | 授权码，免费模式可留空 | 空 |
 

@@ -1,233 +1,112 @@
 name: go-emby
-
 services:
-
-  # ==========================================================
-  # PostgreSQL
-  # ==========================================================
-
-  postgres:
-    image: postgres:17-bookworm
-    restart: unless-stopped
-
-    environment:
-      POSTGRES_DB: emby
-      POSTGRES_USER: emby
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
-
-    volumes:
-      - type: bind
-        source: ${POSTGRES_DATA_PATH:-./postgres-data}
-        target: /var/lib/postgresql/data
-        bind:
-          create_host_path: true
-
-    # 仅供 host 网络的 go-emby 从宿主机访问；bridge 模式仍走 postgres:5432。
-    ports:
-      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
-
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - pg_isready -U emby -d emby
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-
-  # ==========================================================
-  # Schema preparation
-  # ==========================================================
-
-  # 每次升级在主服务启动前自动检查/补齐当前版本所需 schema。
-  # 该服务执行完成即退出，不常驻、不占用运行期 CPU/内存。
-  schema-prepare:
-    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
-    command: ["--prepare-schema"]
-    restart: "no"
-
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-    environment:
-      DATABASE_URL: &database-url >-
-        postgres://emby:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/emby?sslmode=disable
-
-    healthcheck:
-      disable: true
-
-    security_opt:
-      - no-new-privileges:true
-
-    cap_drop:
-      - ALL
-
-
-  # ==========================================================
-  # go-emby
-  # ==========================================================
-
   go-emby:
     image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
-    restart: unless-stopped
-
-    # 默认以 root 身份运行，避免宿主机媒体目录由 root:root 创建时
-    # 无法写入 NFO、海报等刮削文件。需要降权时可在 .env 设置 PUID/PGID。
     user: "${PUID:-0}:${PGID:-0}"
-
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       schema-prepare:
         condition: service_completed_successfully
-
-    ports:
-      - "${HTTP_PORT:-8097}:8097"
-
-    environment:
-
-      DATABASE_URL: *database-url
-
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 设置 ADMIN_PASSWORD}
-
+    ports: ["${HTTP_PORT:-8097}:8097"]
+    environment: &app-env
+      TZ: ${TZ:-Asia/Shanghai}
+      DATABASE_URL: ${DATABASE_URL:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       LICENSE_KEY: ${LICENSE_KEY:-}
-
       LICENSE_SERVER_URL: ${LICENSE_SERVER_URL:-https://tl.macacaaca.top}
-
-      LICENSE_CA_FILE: ${LICENSE_CA_FILE:-}
-
       PUBLIC_URL: ${PUBLIC_URL:-}
-
       BOOTSTRAP_API_KEY: ${BOOTSTRAP_API_KEY:-}
-
       XIAOYA_USERNAME: ${XIAOYA_USERNAME:-dav}
       XIAOYA_PASSWORD: ${XIAOYA_PASSWORD:-}
       GO_EMBY_INSTANCE_ID: ${GO_EMBY_INSTANCE_ID:-}
-
       MEDIA_INFO_ROOT: /app/data
-
       FILE_MANAGER_ROOT: /media
-
       MEDIA_ROOTS: ${MEDIA_ROOTS:-/media}
-
-
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export PGPASSWORD="$${POSTGRES_PASSWORD:-$$(cat /run/bootstrap/postgres-password)}"
+        [ -n "$$DATABASE_URL" ] || export DATABASE_URL="postgres://emby:$$(printf '%s' "$$PGPASSWORD" | od -An -v -tx1 | tr -d ' \n' | sed 's/../%&/g')@postgres:5432/emby?sslmode=disable"
+        if [ -z "$$ADMIN_PASSWORD" ]; then
+          umask 077
+          if [ ! -s /app/data/initial-admin-password ]; then
+            od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > /app/data/initial-admin-password.tmp
+            mv /app/data/initial-admin-password.tmp /app/data/initial-admin-password
+          fi
+          export ADMIN_PASSWORD="$$(cat /app/data/initial-admin-password)"
+        fi
+        exec /usr/local/bin/go-emby
     volumes:
-
-      # ======================================================
-      # go-emby 自身数据
-      # ======================================================
-
-      - type: bind
-        source: ${APP_DATA_PATH:-./app-data}
-        target: /app/data
-        bind:
-          create_host_path: true
-
-      - type: bind
-        source: ${APP_BACKUP_PATH:-./app-backups}
-        target: /app/backups
-        bind:
-          create_host_path: true
-
-
-      # ======================================================
-      # 媒体目录
-      #
-      # MEDIA_PATH 是宿主机目录，必须事先存在；容器内固定为 /media。
-      # 默认读写，支持 NFO、海报等文件写入。
-      # 其他媒体目录可按下方示例自行增加。
-      # ======================================================
-
-
-      - type: bind
-        source: ${MEDIA_PATH:-./media}
-        target: /media
-        read_only: false
-        bind:
-          create_host_path: false
-
-
-      # 电影
-      # - /vol1/1000/strm/dy:/movies:rw
-
-
-      # 电视剧
-      # - /vol1/1000/strm/dsj:/tv:rw
-
-
-      # 动漫
-      # - /vol1/1000/strm/dm:/anime:rw
-
-
-      # 音乐
-      # - /vol1/1000/strm/yy:/music:rw
-
-
-      # ======================================================
-      # 更多示例
-      #
-      # - /data1/media:/data1:rw
-      # - /data2/media:/data2:rw
-      # - /mnt/115:/115:rw
-      # - /mnt/alist:/alist:rw
-      #
-      # 如果启用了多个容器目录，例如：
-      #
-      #   /media
-      #   /movies
-      #   /tv
-      #   /anime
-      #
-      # 请同步修改 .env：
-      #
-      # MEDIA_ROOTS=/media:/movies:/tv:/anime
-      # ======================================================
-
-
-      # ======================================================
-      # 授权机器 ID
-      # ======================================================
-
-      - type: bind
-        source: /etc/machine-id
-        target: /run/license-machine-id
-        read_only: true
-        bind:
-          create_host_path: false
-
-
-      # ======================================================
-      # 私有 CA / secrets
-      #
-      # 首次启动时自动创建空目录；如使用 LICENSE_CA_FILE，
-      # 请将证书放在此目录中。
-      # ======================================================
-
-      - type: bind
-        source: ./secrets
-        target: /run/secrets
-        read_only: true
-        bind:
-          create_host_path: true
-
-
+      - ${APP_DATA_PATH:-app-data}:/app/data
+      - ${APP_BACKUP_PATH:-app-backups}:/app/backups
+      - ${MEDIA_PATH:-media}:/media:rw
+      - bootstrap:/run/bootstrap:ro
+      - /etc/machine-id:/run/license-machine-id:ro
     stop_grace_period: 45s
-
-    security_opt:
-      - no-new-privileges:true
-
-    cap_drop:
-      - ALL
-
-    logging:
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE, FOWNER]
+    logging: &logging
       driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      options: {max-size: "10m", max-file: "3"}
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      POSTGRES_DB: emby
+      POSTGRES_USER: emby
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$POSTGRES_PASSWORD" ]; then
+          umask 077
+          if [ ! -s /run/bootstrap/postgres-password ]; then
+            if [ -s /var/lib/postgresql/data/PG_VERSION ]; then
+              echo 'Existing database: set the original POSTGRES_PASSWORD; refusing to replace credentials.' >&2
+              exit 1
+            fi
+            od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > /run/bootstrap/postgres-password.tmp
+            mv /run/bootstrap/postgres-password.tmp /run/bootstrap/postgres-password
+          fi
+          export POSTGRES_PASSWORD="$$(cat /run/bootstrap/postgres-password)"
+        fi
+        exec /usr/local/bin/docker-entrypoint.sh postgres
+    volumes:
+      - ${POSTGRES_DATA_PATH:-postgres-data}:/var/lib/postgresql/data
+      - bootstrap:/run/bootstrap
+    ports: ["127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U emby -d emby"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+  schema-prepare:
+    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
+    user: "0:0"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *app-env
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export PGPASSWORD="$${POSTGRES_PASSWORD:-$$(cat /run/bootstrap/postgres-password)}"
+        [ -n "$$DATABASE_URL" ] || export DATABASE_URL="postgres://emby:$$(printf '%s' "$$PGPASSWORD" | od -An -v -tx1 | tr -d ' \n' | sed 's/../%&/g')@postgres:5432/emby?sslmode=disable"
+        exec /usr/local/bin/go-emby --prepare-schema
+    volumes: ["bootstrap:/run/bootstrap:ro"]
+    healthcheck: {disable: true}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+volumes:
+  app-data:
+  app-backups:
+  postgres-data:
+  media:
+  bootstrap:

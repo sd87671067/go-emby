@@ -31,11 +31,13 @@ services:
         export PGPASSWORD="$${POSTGRES_PASSWORD:-$$(cat /run/bootstrap/postgres-password)}"
         [ -n "$$DATABASE_URL" ] || export DATABASE_URL="postgres://emby:$$(printf '%s' "$$PGPASSWORD" | od -An -v -tx1 | tr -d ' \n' | sed 's/../%&/g')@postgres:5432/emby?sslmode=disable"
         if [ -z "$$ADMIN_PASSWORD" ]; then
-          umask 077
-          if [ ! -s /app/data/initial-admin-password ]; then
-            od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > /app/data/initial-admin-password.tmp
-            mv /app/data/initial-admin-password.tmp /app/data/initial-admin-password
-          fi
+          (
+            umask 077
+            if [ ! -s /app/data/initial-admin-password ]; then
+              od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > /app/data/initial-admin-password.tmp
+              mv /app/data/initial-admin-password.tmp /app/data/initial-admin-password
+            fi
+          )
           export ADMIN_PASSWORD="$$(cat /app/data/initial-admin-password)"
         fi
         exec /usr/local/bin/go-emby

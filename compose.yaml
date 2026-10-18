@@ -1,13 +1,19 @@
+# Go-Emby 一键部署：保存本文件后运行 docker compose up -d
+# 默认访问：http://服务器IP:8097；无需额外创建 .env
+# 要使用宿主机影视文件，请修改下方 MEDIA_PATH 对应的挂载路径。
 name: go-emby
 services:
+  # 影视服务器：网页管理、海报墙和播放入口
   go-emby:
     image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
     user: "${PUID:-0}:${PGID:-0}"
     restart: unless-stopped
     depends_on:
-      postgres:
+      # 数据库：保存用户、媒体库记录等信息
+  postgres:
         condition: service_healthy
-      schema-prepare:
+      # 一次性准备数据库结构：成功后退出，不会一直运行
+  schema-prepare:
         condition: service_completed_successfully
     ports: ["${HTTP_PORT:-8097}:8097"]
     environment: &app-env
@@ -42,8 +48,10 @@ services:
         fi
         exec /usr/local/bin/go-emby
     volumes:
+      # 左侧为数据保存位置，右侧为容器内路径；保持默认即可使用
       - ${APP_DATA_PATH:-app-data}:/app/data
       - ${APP_BACKUP_PATH:-app-backups}:/app/backups
+      # 默认 media 数据卷；可改成 /你的影视目录:/media:rw
       - ${MEDIA_PATH:-media}:/media:rw
       - bootstrap:/run/bootstrap:ro
       - /etc/machine-id:/run/license-machine-id:ro
@@ -106,9 +114,11 @@ services:
     healthcheck: {disable: true}
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
+# Docker 会自动创建下列数据卷，无需手动创建文件夹。
+# 更新容器不会删除数据卷；切勿随意执行 docker compose down -v。
 volumes:
-  app-data:
-  app-backups:
-  postgres-data:
-  media:
-  bootstrap:
+  app-data:       # Go-Emby 设置和应用数据
+  app-backups:    # Go-Emby 备份文件
+  postgres-data:  # PostgreSQL 数据库，包含用户和媒体库记录
+  media:          # 默认媒体目录，可换成宿主机影视目录
+  bootstrap:      # 首次安装生成的数据库密码，数据库与应用共用；不要删除

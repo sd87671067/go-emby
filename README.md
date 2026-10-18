@@ -22,7 +22,7 @@ Go Emby是用go语言编写的 Emby 兼容媒体服务器，提供 Web 管理界
 
 ## Docker Compose 部署
 
-新安装只需一个 `compose.yaml`，不强制 `.env`：
+只需一个 `compose.yaml` 即可安装，无需编写 `.env`：
 
 ```bash
 mkdir -p ~/go-emby && cd ~/go-emby
@@ -38,32 +38,21 @@ docker compose up -d
 docker compose exec go-emby cat /app/data/initial-admin-password
 ```
 
-已有 `ADMIN_PASSWORD` 仍优先使用，且仅在空用户库首次初始化时生效，不会重置旧账号密码。数据库密码保存在独立的 `bootstrap` 卷中，仅以只读方式提供给应用和 Schema 服务；应用数据与 PostgreSQL 使用独立持久化卷。不要删除这些卷。媒体默认使用可读写的 `media` 卷；挂载宿主机媒体可设置 `.env` 中的 `MEDIA_PATH=/你的媒体目录`。额外媒体路径需要保留原挂载并同步配置 `MEDIA_ROOTS`。
+需要自行指定首次管理员密码时，可使用可选的 `.env` 设置 `ADMIN_PASSWORD`；该值仅在空用户库首次初始化时生效，不会重置已有账号密码。数据库密码保存在独立的 `bootstrap` 卷中，仅以只读方式提供给应用和 Schema 服务；应用数据与 PostgreSQL 使用独立持久化卷。不要删除这些卷。媒体默认使用可读写的 `media` 卷。要读取宿主机已有的影视文件，可直接将 `compose.yaml` 中的 `- ${MEDIA_PATH:-media}:/media:rw` 改成 `- /你的影视目录:/media:rw`；如有多个媒体目录，再添加挂载并配置 `MEDIA_ROOTS`。
 
-## 已有用户升级
+## 数据卷是什么意思？
 
-保留原项目名称、部署目录、`.env`、Compose overrides、原密码、卷及所有数据。先用 `docker inspect` 核对当前容器的 Mounts，再用 `docker compose config` 对比新配置。**原来使用 bind mount 的用户必须保留原路径变量**，例如：
+`volumes` 是 Docker 自动管理的数据保存位置。删除或重新创建容器，通常不会删除这些数据卷；但执行 `docker compose down -v` 会删除本项目管理的卷，请勿使用。
 
-```dotenv
-APP_DATA_PATH=./app-data
-APP_BACKUP_PATH=./app-backups
-POSTGRES_DATA_PATH=./postgres-data
-MEDIA_PATH=./media
-```
+| 名称 | 用途 |
+| --- | --- |
+| `app-data` | 保存 Go-Emby 的应用数据与设置 |
+| `app-backups` | 保存 Go-Emby 备份文件 |
+| `postgres-data` | 保存 PostgreSQL 数据库（用户、媒体库记录等） |
+| `media` | 默认影视文件目录，也可以换成宿主机的真实影视目录 |
+| `bootstrap` | **首次安装生成的数据库密码**，供数据库和应用连接时使用；不是影视文件，不能随意删除 |
 
-相对路径仍相对于原 Compose 目录；也可填写原目录的绝对路径。旧 `.env` 已有这些变量时直接继续使用。原来使用 named volume 的用户应保持相同项目名和卷名（默认 `go-emby_app-data`、`go-emby_postgres-data` 等）；自定义卷可在 override 中指明原 external volume。没有设置路径的新版默认使用 named volume，不能替换为一个空卷后启动旧安装。
-
-保留原 `POSTGRES_PASSWORD`（包括特殊字符，启动时逐字节 URL 编码）及 `DATABASE_URL`、`LICENSE_KEY`、`LICENSE_SERVER_URL`、`GO_EMBY_INSTANCE_ID`。旧数据库若没有原密码也没有 bootstrap 密码文件会明确停止，不生成替代密码、不重置数据库。默认保留机器标识挂载以维持授权绑定；自定义授权证书不再内置，需要该配置的旧部署应保留自己的环境变量及只读证书挂载 override。
-
-核对挂载后执行：
-
-```bash
-docker compose pull
-docker compose up -d
-docker compose ps -a
-```
-
-这只更新服务，不搬迁原数据库和文件；Schema 准备保留现有数据并幂等执行。旧 Host 网络继续使用原 `compose.host.yaml`，每次命令带上 `-f compose.yaml -f compose.host.yaml`。不要用旧安装脚本进行此次升级；该脚本存在历史数据搬迁逻辑，本次模板不调用它。
+`schema-prepare` 是首次启动和升级时准备数据库结构的一次性服务，执行成功就退出；正常长期运行的只有 Go-Emby 和 PostgreSQL。
 
 ## 媒体写入与 Xiaoya
 
@@ -75,7 +64,7 @@ root 无法绕过容器/宿主机 `ro`、NFS `root_squash`、CIFS/FUSE 服务端
 
 ## 配置说明
 
-完整环境变量和配置说明：
+进阶用户可选用 `.env` 自定义配置；不使用 `.env` 也可以正常安装。完整环境变量说明：
 
 [ENV_GUIDE.md](ENV_GUIDE.md)
 

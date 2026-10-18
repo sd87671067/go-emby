@@ -1,3 +1,6 @@
+# 默认镜像版本与本配置配套；如覆盖 IMAGE_TAG，请使用支持 Go 内部数据库凭据解析的版本。
+# 升级请保留原 Compose 项目名、数据卷和挂载路径；由 Compose 替换旧的项目生成容器名。
+# 若 go-emby 名称已被其他项目占用，先核实归属，勿删除数据库/数据卷或改项目名绕过冲突。
 # Go-Emby 一键部署：保存本文件后运行 docker compose up -d
 # 默认访问：http://服务器IP:8097；无需额外创建 .env
 # 要使用宿主机影视文件，请修改下方 MEDIA_PATH 对应的挂载路径。
@@ -5,7 +8,8 @@ name: go-emby
 services:
   # 影视服务器：网页管理、海报墙和播放入口
   go-emby:
-    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
+    container_name: go-emby
+    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-2026.10.18-153219}
     user: "${PUID:-0}:${PGID:-0}"
     restart: unless-stopped
     depends_on:
@@ -34,8 +38,6 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        export PGPASSWORD="$${POSTGRES_PASSWORD:-$$(cat /run/bootstrap/postgres-password)}"
-        [ -n "$$DATABASE_URL" ] || export DATABASE_URL="postgres://emby:$$(printf '%s' "$$PGPASSWORD" | od -An -v -tx1 | tr -d ' \n' | sed 's/../%&/g')@postgres:5432/emby?sslmode=disable"
         if [ -z "$$ADMIN_PASSWORD" ]; then
           (
             umask 077
@@ -97,7 +99,7 @@ services:
       retries: 20
     logging: *logging
   schema-prepare:
-    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
+    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-2026.10.18-153219}
     user: "0:0"
     restart: "no"
     depends_on:
@@ -107,8 +109,6 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        export PGPASSWORD="$${POSTGRES_PASSWORD:-$$(cat /run/bootstrap/postgres-password)}"
-        [ -n "$$DATABASE_URL" ] || export DATABASE_URL="postgres://emby:$$(printf '%s' "$$PGPASSWORD" | od -An -v -tx1 | tr -d ' \n' | sed 's/../%&/g')@postgres:5432/emby?sslmode=disable"
         exec /usr/local/bin/go-emby --prepare-schema
     volumes: ["bootstrap:/run/bootstrap:ro"]
     healthcheck: {disable: true}

@@ -10,10 +10,10 @@ services:
     restart: unless-stopped
     depends_on:
       # 数据库：保存用户、媒体库记录等信息
-  postgres:
+      postgres:
         condition: service_healthy
       # 一次性准备数据库结构：成功后退出，不会一直运行
-  schema-prepare:
+      schema-prepare:
         condition: service_completed_successfully
     ports: ["${HTTP_PORT:-8097}:8097"]
     environment: &app-env

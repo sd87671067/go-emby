@@ -9,7 +9,7 @@ services:
   # 影视服务器：网页管理、海报墙和播放入口
   go-emby:
     container_name: go-emby
-    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-2026.10.18-153219}
+    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
     user: "${PUID:-0}:${PGID:-0}"
     restart: unless-stopped
     depends_on:
@@ -99,7 +99,7 @@ services:
       retries: 20
     logging: *logging
   schema-prepare:
-    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-2026.10.18-153219}
+    image: ghcr.io/sd87671067/go-emby:${IMAGE_TAG:-latest}
     user: "0:0"
     restart: "no"
     depends_on:

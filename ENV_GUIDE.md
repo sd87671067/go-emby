@@ -27,6 +27,6 @@ docker compose exec go-emby cat /app/data/initial-admin-password
 | `PUBLIC_URL` / `BOOTSTRAP_API_KEY` | 保留旧配置；默认空 |
 | `XIAOYA_USERNAME` / `XIAOYA_PASSWORD` | 旧凭据兼容；新 UI 密码优先，用户名固定 dav，留空保留 |
 
-旧自定义证书或额外挂载需保留原 override，精简模板不再声明 `LICENSE_CA_FILE` 和 secrets 目录。不需要 NanShare/Xiaoya URL 变量来解析播放源；本模板不会创建或修改任何第三方服务。
+授权服务 HTTPS 使用系统 CA 证书链及主机名校验，无需自定义 CA 文件、证书路径或授权证书挂载。原 override 中仅用于授权服务的自定义 CA 环境变量及挂载可移除；其他功能使用的证书、密钥和挂载继续保留。不需要 NanShare/Xiaoya URL 变量来解析播放源；本模板不会创建或修改任何第三方服务。
 
 无 `.env` 安装的数据库密码在独立 bootstrap 卷中，管理员密码在 app-data 中；两个密码不同、文件权限 600。备份时保留应用、数据库、bootstrap 和备份卷，媒体卷或外部媒体目录也需按原策略备份。显式配置密码时通过 `.env` 保护并执行 `chmod 600 .env`，含 `$`、`#` 或空格使用单引号。

@@ -40,27 +40,6 @@ docker compose exec go-emby cat /app/data/initial-admin-password
 
 需要自行指定首次管理员密码时，可使用可选的 `.env` 设置 `ADMIN_PASSWORD`；该值仅在空用户库首次初始化时生效，不会重置已有账号密码。数据库密码保存在独立的 `bootstrap` 卷中，仅以只读方式提供给应用和 Schema 服务；应用数据与 PostgreSQL 使用独立持久化卷。不要删除这些卷。媒体默认使用可读写的 `media` 卷。要读取宿主机已有的影视文件，可直接将 `compose.yaml` 中的 `- ${MEDIA_PATH:-media}:/media:rw` 改成 `- /你的影视目录:/media:rw`；如有多个媒体目录，再添加挂载并配置 `MEDIA_ROOTS`。
 
-## 数据卷是什么意思？
-
-`volumes` 是 Docker 自动管理的数据保存位置。删除或重新创建容器，通常不会删除这些数据卷；但执行 `docker compose down -v` 会删除本项目管理的卷，请勿使用。
-
-| 名称 | 用途 |
-| --- | --- |
-| `app-data` | 保存 Go-Emby 的应用数据与设置 |
-| `app-backups` | 保存 Go-Emby 备份文件 |
-| `postgres-data` | 保存 PostgreSQL 数据库（用户、媒体库记录等） |
-| `media` | 默认影视文件目录，也可以换成宿主机的真实影视目录 |
-| `bootstrap` | **首次安装生成的数据库密码**，供数据库和应用连接时使用；不是影视文件，不能随意删除 |
-
-`schema-prepare` 是首次启动和升级时准备数据库结构的一次性服务，执行成功就退出；正常长期运行的只有 Go-Emby 和 PostgreSQL。
-
-## 媒体写入与 Xiaoya
-
-应用默认 root，并在 `cap_drop: ALL` 下仅补回 `DAC_OVERRIDE` 和 `FOWNER`，覆盖旧目录属主与权限造成的本地写入问题；不递归 chmod/chown，不修改其他容器。主动设置 `PUID/PGID` 的旧用户仍可降权，但需让该用户获得目标目录访问权限。NFO、海报、背景、字幕及 STRM 采用受限目录内原子发布；保留既有用户文件及来源所有权检查。
-
-root 无法绕过容器/宿主机 `ro`、NFS `root_squash`、CIFS/FUSE 服务端权限、NAS ACL 或用户命名空间限制。失败提示保留 errno 并说明检查方向，不对这些限制自动 chmod。可用 `findmnt -T 媒体路径`、`namei -l 媒体路径`、`getfacl 媒体路径` 检查；同时检查容器 Mounts 的 RW、Capabilities 和宿主机映射。
-
-新版应用的 Xiaoya 设置在“启用 STRM 同步”下提供密码框，新保存的密码固定使用 `dav`；密码加密持久化，不回显，留空保留。未保存新密码时继续兼容 `XIAOYA_USERNAME` / `XIAOYA_PASSWORD` 和源目录 `guestpass.txt`。同步的增量、缺失补回、来源隔离与暂停恢复行为保持不变。此文档和 Compose 更新不发布 GHCR；这些应用修复需使用包含相应私库提交的镜像。
 
 ## 配置说明
 
